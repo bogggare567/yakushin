@@ -1,0 +1,22 @@
+# LEGO instruction PDFs are copyrighted ("own use only") and huge - never commit them.
+*.pdf
+
+# Private client conversation - not part of the project deliverable.
+разговор с закзчиками.rtf
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Local Claude Code permission prefs (personal, not shared project config)
+.claude/settings.local.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editor
+.vscode/
+.idea/
