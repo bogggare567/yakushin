@@ -1,16 +1,20 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
-const RENDER_SCALE = 2.0; // px per pdf point, matches the reference implementation this was tuned against
+const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
 const BOX_BG = [215, 238, 254]; // the light-blue "new parts" callout background color
 const BOX_COLOR_TOL = 14; // tolerance for matching the box background color
 const FG_DIFF_THRESHOLD = 35; // per-pixel max-channel diff to count as foreground (icon/text) inside a box
-const MIN_BOX_W = 40, MIN_BOX_H = 40, MIN_BOX_AREA = 400;
-const MIN_COL_GAP = 6; // px of background between two item slots
-const MIN_ROW_GAP = 2; // px of background rows between icon and qty text
-const HASH_SIZE = 8; // dHash grid size -> HASH_SIZE*(HASH_SIZE-1) bits
-const HASH_HAMMING_TOL = 6;
-const COLOR_TOL = 20;
+const SCALE_REF = 2.0; // the render scale the px-based constants below were tuned at
+const SIZE_K = RENDER_SCALE / SCALE_REF;
+const MIN_BOX_W = 40 * SIZE_K, MIN_BOX_H = 40 * SIZE_K, MIN_BOX_AREA = 400 * SIZE_K * SIZE_K;
+const MIN_COL_GAP = 6 * SIZE_K; // px of background between two item slots
+const MIN_ROW_GAP = 2 * SIZE_K; // px of background rows between icon and qty text
+const SIG_SIZE = 14; // color-grid signature size (px) used to identify/dedup a part's icon
+const SIG_MARGIN = 2; // border reserved inside SIG_SIZE so small shifts stay in-bounds
+const SIG_MAX_SHIFT = 2; // px of shift tried in each direction when comparing two signatures
+const SIG_DIST_TOL = 40; // max mean color difference (0-255 scale) to call two icons the same part
+const COLOR_TOL = 24;
 const GLYPH_MIN_GAP = 1; // px of background columns between two digit glyphs
 const GLYPH_MAX_DIST_FRAC = 0.22; // fraction of bits mismatched above which a glyph match is untrusted
 
@@ -27,11 +31,43 @@ const progressFill = document.getElementById("progress-fill");
 const progressLabel = document.getElementById("progress-label");
 const summaryEl = document.getElementById("summary");
 const resultsEl = document.getElementById("results");
+const viewControls = document.getElementById("view-controls");
+const modeListBtn = document.getElementById("mode-list-btn");
+const modeStepBtn = document.getElementById("mode-step-btn");
+const sortSelect = document.getElementById("sort-select");
+const stepModeEl = document.getElementById("step-mode");
+const stepPrevBtn = document.getElementById("step-prev");
+const stepNextBtn = document.getElementById("step-next");
+const stepSlider = document.getElementById("step-slider");
+const stepLabel = document.getElementById("step-label");
+const stepPageImg = document.getElementById("step-page-img");
+const stepCurrentItems = document.getElementById("step-current-items");
+const stepRemainingItems = document.getElementById("step-remaining-items");
 
 let pdfDoc = null;
 
+const state = {
+  buckets: [],
+  pageRecords: [],
+  from: 1,
+  to: 1,
+  pagesWithParts: 0,
+  mode: "list",
+  sortMode: "count-desc",
+  stepIndex: 0,
+};
+
 pdfInput.addEventListener("change", onPdfSelected);
 analyzeBtn.addEventListener("click", runAnalysis);
+modeListBtn.addEventListener("click", () => setMode("list"));
+modeStepBtn.addEventListener("click", () => setMode("step"));
+sortSelect.addEventListener("change", () => {
+  state.sortMode = sortSelect.value;
+  render();
+});
+stepPrevBtn.addEventListener("click", () => goToStep(state.stepIndex - 1));
+stepNextBtn.addEventListener("click", () => goToStep(state.stepIndex + 1));
+stepSlider.addEventListener("input", () => goToStep(parseInt(stepSlider.value, 10)));
 
 async function onPdfSelected(e) {
   const file = e.target.files[0];
@@ -62,20 +98,27 @@ async function runAnalysis() {
   progressWrap.hidden = false;
   resultsEl.innerHTML = "";
   summaryEl.hidden = true;
+  viewControls.hidden = true;
+  stepModeEl.hidden = true;
   setProgress(0, "Подготовка…");
 
-  const buckets = []; // {bits, avgColor, count, unsure, pages:Set, thumbUrl}
+  const buckets = [];
+  const pageRecords = [];
   const totalPages = to - from + 1;
   let pagesWithParts = 0;
 
   for (let pageNum = from; pageNum <= to; pageNum++) {
     setProgress((pageNum - from) / totalPages, `Страница ${pageNum} из ${to} (${from}-${to})`);
     try {
-      const items = await processPage(pageNum);
+      const { items, thumbDataUrl } = await processPage(pageNum);
       if (items.length) pagesWithParts++;
+      const pageItems = [];
       for (const it of items) {
-        addToBuckets(buckets, it, pageNum);
+        const bucketIdx = addToBuckets(buckets, it, pageNum);
+        const qty = it.qty ?? 1;
+        pageItems.push({ bucketIdx, qty, unsure: it.unsure || it.qty === null });
       }
+      pageRecords.push({ pageNum, thumbDataUrl, items: pageItems });
     } catch (err) {
       console.error("Ошибка на странице", pageNum, err);
     }
@@ -84,7 +127,14 @@ async function runAnalysis() {
   }
 
   setProgress(1, "Готово");
-  renderResults(buckets, from, to, pagesWithParts, totalPages);
+  state.buckets = buckets;
+  state.pageRecords = pageRecords;
+  state.from = from;
+  state.to = to;
+  state.pagesWithParts = pagesWithParts;
+  state.stepIndex = 0;
+  viewControls.hidden = false;
+  setMode("list");
   analyzeBtn.disabled = false;
 }
 
@@ -111,7 +161,18 @@ async function processPage(pageNum) {
   for (const box of boxes) {
     items.push(...extractBoxItems(canvas, ctx, box));
   }
-  return items;
+  const thumbDataUrl = makePageThumb(canvas);
+  return { items, thumbDataUrl };
+}
+
+function makePageThumb(canvas) {
+  const targetW = Math.min(640, canvas.width);
+  const scale = targetW / canvas.width;
+  const tw = Math.round(targetW), th = Math.round(canvas.height * scale);
+  const t = document.createElement("canvas");
+  t.width = tw; t.height = th;
+  t.getContext("2d").drawImage(canvas, 0, 0, tw, th);
+  return t.toDataURL("image/jpeg", 0.72);
 }
 
 // ---------- box detection (connected components on box-background color) ----------
@@ -455,55 +516,95 @@ function autocropCanvas(canvas) {
   return out;
 }
 
+// Same LEGO part rendered on different pages can land 1-2px apart within its cell
+// (box layout shifts slightly depending on how many sibling items share it), so plain
+// pixel/gradient hashing sees "different" parts. Comparing small color grids across a
+// handful of shift offsets and keeping the best alignment makes matching shift-tolerant.
 function computeSignature(canvas) {
-  const small = document.createElement("canvas");
-  small.width = HASH_SIZE + 1;
-  small.height = HASH_SIZE;
-  const sctx = small.getContext("2d");
-  sctx.imageSmoothingEnabled = true;
-  sctx.drawImage(canvas, 0, 0, small.width, small.height);
-  const { data } = sctx.getImageData(0, 0, small.width, small.height);
-
-  const gray = [];
-  let rSum = 0, gSum = 0, bSum = 0;
-  for (let i = 0; i < data.length; i += 4) {
-    gray.push(0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2]);
-    rSum += data[i]; gSum += data[i + 1]; bSum += data[i + 2];
+  const cw = canvas.width, ch = canvas.height;
+  const octx = canvas.getContext("2d");
+  const odata = octx.getImageData(0, 0, cw, ch).data;
+  let rSum = 0, gSum = 0, bSum = 0, cnt = 0;
+  for (let i = 0; i < odata.length; i += 4) {
+    const dr = Math.abs(odata[i] - BOX_BG[0]), dg = Math.abs(odata[i + 1] - BOX_BG[1]), db = Math.abs(odata[i + 2] - BOX_BG[2]);
+    if (Math.max(dr, dg, db) > FG_DIFF_THRESHOLD) { rSum += odata[i]; gSum += odata[i + 1]; bSum += odata[i + 2]; cnt++; }
   }
-  const n = data.length / 4;
-  const avgColor = [rSum / n, gSum / n, bSum / n];
+  const avgColor = cnt > 0 ? [rSum / cnt, gSum / cnt, bSum / cnt] : [BOX_BG[0], BOX_BG[1], BOX_BG[2]];
 
-  const bits = [];
-  for (let y = 0; y < HASH_SIZE; y++) {
-    for (let x = 0; x < HASH_SIZE; x++) {
-      const left = gray[y * (HASH_SIZE + 1) + x];
-      const right = gray[y * (HASH_SIZE + 1) + x + 1];
-      bits.push(left > right ? 1 : 0);
-    }
+  const scale = Math.min((SIG_SIZE - 2 * SIG_MARGIN) / cw, (SIG_SIZE - 2 * SIG_MARGIN) / ch);
+  const nw = Math.max(1, Math.round(cw * scale)), nh = Math.max(1, Math.round(ch * scale));
+  const norm = document.createElement("canvas");
+  norm.width = SIG_SIZE; norm.height = SIG_SIZE;
+  const nctx = norm.getContext("2d");
+  nctx.fillStyle = `rgb(${BOX_BG[0]},${BOX_BG[1]},${BOX_BG[2]})`;
+  nctx.fillRect(0, 0, SIG_SIZE, SIG_SIZE);
+  nctx.imageSmoothingEnabled = true;
+  const ox = Math.floor((SIG_SIZE - nw) / 2), oy = Math.floor((SIG_SIZE - nh) / 2);
+  nctx.drawImage(canvas, 0, 0, cw, ch, ox, oy, nw, nh);
+
+  const { data } = nctx.getImageData(0, 0, SIG_SIZE, SIG_SIZE);
+  const grid = new Uint8ClampedArray(SIG_SIZE * SIG_SIZE * 3);
+  const fgGrid = new Uint8Array(SIG_SIZE * SIG_SIZE);
+  for (let p = 0, i = 0; p < SIG_SIZE * SIG_SIZE; p++, i += 4) {
+    grid[p * 3] = data[i]; grid[p * 3 + 1] = data[i + 1]; grid[p * 3 + 2] = data[i + 2];
+    const dr = Math.abs(data[i] - BOX_BG[0]), dg = Math.abs(data[i + 1] - BOX_BG[1]), db = Math.abs(data[i + 2] - BOX_BG[2]);
+    fgGrid[p] = Math.max(dr, dg, db) > FG_DIFF_THRESHOLD ? 1 : 0;
   }
-  return { bits, avgColor };
+  return { grid, fgGrid, avgColor };
 }
 
-function hammingDist(a, b) {
-  let d = 0;
-  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
-  return d;
+// Mean absolute color difference between two signature grids, minimized over small
+// (dx, dy) offsets so a 1-2px rendering shift doesn't register as a different part.
+// Only pixels that are part of the actual icon (in either grid) count - background-vs-
+// background agreement is free and must not dilute genuine content differences.
+function gridDist(a, b) {
+  let best = Infinity;
+  for (let dy = -SIG_MAX_SHIFT; dy <= SIG_MAX_SHIFT; dy++) {
+    for (let dx = -SIG_MAX_SHIFT; dx <= SIG_MAX_SHIFT; dx++) {
+      let sum = 0, n = 0, uncovered = 0;
+      for (let y = 0; y < SIG_SIZE; y++) {
+        const sy = y + dy;
+        for (let x = 0; x < SIG_SIZE; x++) {
+          const sx = x + dx;
+          const aFg = a.fgGrid[y * SIG_SIZE + x];
+          const outOfBounds = sy < 0 || sy >= SIG_SIZE || sx < 0 || sx >= SIG_SIZE;
+          const bFg = outOfBounds ? 0 : b.fgGrid[sy * SIG_SIZE + sx];
+          if (!aFg && !bFg) continue;
+          if (aFg && (outOfBounds || !bFg)) { uncovered++; n++; continue; }
+          if (!aFg && bFg) { uncovered++; n++; continue; }
+          const ia = (y * SIG_SIZE + x) * 3, ib = (sy * SIG_SIZE + sx) * 3;
+          sum += Math.abs(a.grid[ia] - b.grid[ib]) + Math.abs(a.grid[ia + 1] - b.grid[ib + 1]) + Math.abs(a.grid[ia + 2] - b.grid[ib + 2]);
+          n++;
+        }
+      }
+      if (n === 0) continue;
+      // treat "content on one side, background on the other" as a large mismatch (255)
+      const avg = (sum + uncovered * 255 * 3) / (n * 3);
+      if (avg < best) best = avg;
+    }
+  }
+  return best;
 }
 
 function colorDist(a, b) {
   return Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2]));
 }
 
+function findBucket(buckets, sig) {
+  return buckets.find(
+    (b) => colorDist(b.avgColor, sig.avgColor) <= COLOR_TOL && gridDist(b, sig) <= SIG_DIST_TOL
+  );
+}
+
 function addToBuckets(buckets, item, pageNum) {
   const cropped = autocropCanvas(item.imgCanvas);
   const sig = computeSignature(cropped);
 
-  let bucket = buckets.find(
-    (b) => colorDist(b.avgColor, sig.avgColor) <= COLOR_TOL && hammingDist(b.bits, sig.bits) <= HASH_HAMMING_TOL
-  );
+  let bucket = findBucket(buckets, sig);
   if (!bucket) {
     bucket = {
-      bits: sig.bits,
+      grid: sig.grid,
+      fgGrid: sig.fgGrid,
       avgColor: sig.avgColor,
       count: 0,
       unsure: false,
@@ -520,37 +621,162 @@ function addToBuckets(buckets, item, pageNum) {
     bucket.count += item.qty;
   }
   bucket.pages.add(pageNum);
+  return buckets.indexOf(bucket);
+}
+
+// ---------- sorting ----------
+
+function rgbToHsl([r, g, b]) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  let h = 0, s = 0;
+  const l = (max + min) / 2;
+  const d = max - min;
+  if (d !== 0) {
+    s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+    switch (max) {
+      case r: h = (g - b) / d + (g < b ? 6 : 0); break;
+      case g: h = (b - r) / d + 2; break;
+      default: h = (r - g) / d + 4;
+    }
+    h *= 60;
+  }
+  return [h, s, l * 100];
+}
+
+// grayscale/near-neutral colors have no meaningful hue, so group them by
+// lightness after every hue bucket instead of scattering them at hue 0 (red)
+function colorSortKey(avgColor) {
+  const [h, s, l] = rgbToHsl(avgColor);
+  return s < 0.15 ? 400 + l : h;
+}
+
+function sortEntries(entries, mode, getBucket, getCount, getFirstPage) {
+  const arr = entries.slice();
+  switch (mode) {
+    case "count-asc":
+      arr.sort((a, b) => getCount(a) - getCount(b));
+      break;
+    case "color":
+      arr.sort((a, b) => colorSortKey(getBucket(a).avgColor) - colorSortKey(getBucket(b).avgColor));
+      break;
+    case "page":
+      arr.sort((a, b) => getFirstPage(a) - getFirstPage(b));
+      break;
+    case "count-desc":
+    default:
+      arr.sort((a, b) => getCount(b) - getCount(a));
+  }
+  return arr;
+}
+
+function sortBuckets(buckets, mode) {
+  return sortEntries(
+    buckets, mode,
+    (b) => b,
+    (b) => b.count,
+    (b) => Math.min(...b.pages)
+  );
 }
 
 // ---------- rendering ----------
 
-function renderResults(buckets, from, to, pagesWithParts, totalPages) {
-  const totalUnique = buckets.length;
-  const totalBricks = buckets.reduce((s, b) => s + b.count, 0);
-  summaryEl.hidden = false;
-  summaryEl.innerHTML = `
-    <div>Страницы: <b>${from}–${to}</b></div>
-    <div>Страниц с новыми деталями: <b>${pagesWithParts}</b> из ${totalPages}</div>
-    <div>Уникальных деталей: <b>${totalUnique}</b></div>
-    <div>Всего деталей: <b>${totalBricks}</b></div>
-  `;
+function render() {
+  if (state.mode === "step") renderStepMode();
+  else renderListMode();
+}
 
-  buckets.sort((a, b) => b.count - a.count);
-  resultsEl.innerHTML = "";
-  for (const b of buckets) {
-    const card = document.createElement("div");
-    card.className = "part-card";
-    const pagesArr = Array.from(b.pages).sort((x, y) => x - y);
-    card.innerHTML = `
-      <img src="${b.thumbUrl}" alt="деталь" />
-      <div class="part-qty ${b.unsure ? "unsure" : ""}">×${b.count}${b.unsure ? " ?" : ""}</div>
-      <div class="part-pages">стр. ${summarizePages(pagesArr)}</div>
-    `;
-    resultsEl.appendChild(card);
-  }
+function setMode(mode) {
+  state.mode = mode;
+  modeListBtn.classList.toggle("active", mode === "list");
+  modeStepBtn.classList.toggle("active", mode === "step");
+  resultsEl.hidden = mode !== "list";
+  stepModeEl.hidden = mode !== "step";
+  render();
+}
+
+function goToStep(idx) {
+  state.stepIndex = clamp(idx, 0, state.pageRecords.length - 1);
+  renderStepMode();
+}
+
+function makePartCard(bucket, qty, unsure, pages) {
+  const card = document.createElement("div");
+  card.className = "part-card";
+  const pagesArr = pages.slice().sort((x, y) => x - y);
+  card.innerHTML = `
+    <img src="${bucket.thumbUrl}" alt="деталь" loading="lazy" />
+    <div class="part-qty ${unsure ? "unsure" : ""}">×${qty}${unsure ? " ?" : ""}</div>
+    <div class="part-pages">стр. ${summarizePages(pagesArr)}</div>
+  `;
+  return card;
 }
 
 function summarizePages(pages) {
   if (pages.length <= 6) return pages.join(", ");
   return `${pages[0]}…${pages[pages.length - 1]} (${pages.length} стр.)`;
+}
+
+function renderListMode() {
+  const { buckets, from, to, pagesWithParts, pageRecords } = state;
+  const totalUnique = buckets.length;
+  const totalBricks = buckets.reduce((s, b) => s + b.count, 0);
+  summaryEl.hidden = false;
+  summaryEl.innerHTML = `
+    <div>Страницы: <b>${from}–${to}</b></div>
+    <div>Страниц с новыми деталями: <b>${pagesWithParts}</b> из ${pageRecords.length}</div>
+    <div>Уникальных деталей: <b>${totalUnique}</b></div>
+    <div>Всего деталей: <b>${totalBricks}</b></div>
+  `;
+
+  const sorted = sortBuckets(buckets, state.sortMode);
+  resultsEl.innerHTML = "";
+  for (const b of sorted) {
+    resultsEl.appendChild(makePartCard(b, b.count, b.unsure, Array.from(b.pages)));
+  }
+}
+
+function renderStepMode() {
+  const { buckets, pageRecords, stepIndex } = state;
+  if (!pageRecords.length) return;
+  const rec = pageRecords[stepIndex];
+
+  stepSlider.max = String(pageRecords.length - 1);
+  stepSlider.value = String(stepIndex);
+  stepLabel.textContent = `Страница ${rec.pageNum} (шаг ${stepIndex + 1} из ${pageRecords.length})`;
+  stepPageImg.src = rec.thumbDataUrl;
+  stepPrevBtn.disabled = stepIndex === 0;
+  stepNextBtn.disabled = stepIndex === pageRecords.length - 1;
+
+  const currentEntries = sortEntries(
+    rec.items, state.sortMode,
+    (it) => buckets[it.bucketIdx],
+    (it) => it.qty,
+    () => rec.pageNum
+  );
+  stepCurrentItems.innerHTML = "";
+  for (const it of currentEntries) {
+    stepCurrentItems.appendChild(makePartCard(buckets[it.bucketIdx], it.qty, it.unsure, [rec.pageNum]));
+  }
+
+  const remaining = new Map(); // bucketIdx -> { qty, unsure, pages: Set }
+  for (let i = stepIndex; i < pageRecords.length; i++) {
+    for (const it of pageRecords[i].items) {
+      const cur = remaining.get(it.bucketIdx) || { qty: 0, unsure: false, pages: new Set() };
+      cur.qty += it.qty;
+      if (it.unsure) cur.unsure = true;
+      cur.pages.add(pageRecords[i].pageNum);
+      remaining.set(it.bucketIdx, cur);
+    }
+  }
+  const remainingEntries = sortEntries(
+    Array.from(remaining.entries()), state.sortMode,
+    ([idx]) => buckets[idx],
+    ([, v]) => v.qty,
+    ([, v]) => Math.min(...v.pages)
+  );
+  stepRemainingItems.innerHTML = "";
+  for (const [idx, v] of remainingEntries) {
+    stepRemainingItems.appendChild(makePartCard(buckets[idx], v.qty, v.unsure, Array.from(v.pages)));
+  }
 }

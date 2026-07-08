@@ -42,7 +42,49 @@
 
   <section class="summary" id="summary" hidden></section>
 
+  <section class="view-controls" id="view-controls" hidden>
+    <div class="mode-toggle">
+      <button class="mode-btn active" data-mode="list" id="mode-list-btn">Общий список</button>
+      <button class="mode-btn" data-mode="step" id="mode-step-btn">Пошагово (сборка)</button>
+    </div>
+    <div class="sort-control">
+      <label for="sort-select">Сортировка</label>
+      <select id="sort-select">
+        <option value="count-desc">по количеству ↓</option>
+        <option value="count-asc">по количеству ↑</option>
+        <option value="color">по цвету</option>
+        <option value="page">по первой странице</option>
+      </select>
+    </div>
+  </section>
+
   <section class="results" id="results"></section>
+
+  <section class="step-mode" id="step-mode" hidden>
+    <div class="step-nav">
+      <button id="step-prev" aria-label="Предыдущая страница">←</button>
+      <div class="step-pos">
+        <div class="step-label" id="step-label">Страница — из —</div>
+        <input type="range" id="step-slider" min="0" max="0" value="0" />
+      </div>
+      <button id="step-next" aria-label="Следующая страница">→</button>
+    </div>
+    <div class="step-body">
+      <div class="step-page-preview">
+        <img id="step-page-img" alt="Страница инструкции" />
+      </div>
+      <div class="step-lists">
+        <div class="step-list-block">
+          <h3>Нужно на этой странице</h3>
+          <div class="results step-current" id="step-current-items"></div>
+        </div>
+        <div class="step-list-block">
+          <h3>Осталось найти (с этой страницы и до конца диапазона)</h3>
+          <div class="results step-remaining" id="step-remaining-items"></div>
+        </div>
+      </div>
+    </div>
+  </section>
 </div>
 
 <script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>

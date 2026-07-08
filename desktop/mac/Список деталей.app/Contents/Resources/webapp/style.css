@@ -223,3 +223,154 @@ button:active:not(:disabled) {
   .results { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); }
   .part-card img { height: 80px; }
 }
+
+/* ---------- view controls (mode toggle + sort) ---------- */
+
+.view-controls {
+  margin-top: 18px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 3px;
+  gap: 3px;
+}
+
+.mode-btn {
+  width: auto;
+  background: transparent;
+  color: var(--text-dim);
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  border-radius: 8px;
+}
+
+.mode-btn.active {
+  background: var(--accent);
+  color: white;
+}
+
+.sort-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.sort-control select {
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 0.85rem;
+}
+
+/* ---------- step (build) mode ---------- */
+
+.step-mode {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.step-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+}
+
+.step-nav button {
+  width: 44px;
+  flex-shrink: 0;
+  padding: 10px;
+}
+
+.step-pos {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.step-label {
+  font-size: 0.88rem;
+  font-weight: 600;
+  text-align: center;
+}
+
+.step-slider-hint {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+input[type="range"] {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.step-body {
+  display: grid;
+  grid-template-columns: minmax(200px, 380px) 1fr;
+  gap: 16px;
+}
+
+.step-page-preview {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+}
+
+.step-page-preview img {
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+  background: white;
+}
+
+.step-lists {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.step-list-block h3 {
+  font-size: 0.9rem;
+  margin: 0 0 8px;
+  color: var(--text-dim);
+}
+
+.step-current .part-card {
+  border-color: var(--accent);
+}
+
+.step-current:empty::after,
+.step-remaining:empty::after {
+  content: "—";
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+@media (max-width: 720px) {
+  .step-body { grid-template-columns: 1fr; }
+  .step-page-preview img { max-height: 50vh; object-fit: contain; }
+}
