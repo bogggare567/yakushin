@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>LEGO Список деталей</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <h1>🧱 Список деталей по страницам</h1>
+    <p class="subtitle">Загружает PDF-инструкцию и собирает список уникальных деталей (картинка + количество) для выбранного диапазона страниц. Всё считается прямо в браузере — файл никуда не отправляется.</p>
+  </header>
+
+  <section class="panel" id="setup-panel">
+    <div class="field">
+      <label for="pdf-input">1. Выберите PDF-инструкцию</label>
+      <input type="file" id="pdf-input" accept="application/pdf" />
+      <div class="file-info" id="file-info"></div>
+    </div>
+
+    <div class="field range-fields" id="range-fields" hidden>
+      <label>2. Диапазон страниц</label>
+      <div class="range-row">
+        <input type="number" id="page-from" min="1" step="1" placeholder="от" />
+        <span>—</span>
+        <input type="number" id="page-to" min="1" step="1" placeholder="до" />
+        <span class="page-total" id="page-total"></span>
+      </div>
+    </div>
+
+    <div class="field" id="action-field" hidden>
+      <button id="analyze-btn">Собрать список деталей</button>
+    </div>
+
+    <div class="progress-wrap" id="progress-wrap" hidden>
+      <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
+      <div class="progress-label" id="progress-label"></div>
+    </div>
+  </section>
+
+  <section class="summary" id="summary" hidden></section>
+
+  <section class="results" id="results"></section>
+</div>
+
+<script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>
+<script src="glyph-templates.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,3 @@
+#!/bin/bash
+DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../Resources/webapp" && pwd)"
+open "$DIR/index.html"
