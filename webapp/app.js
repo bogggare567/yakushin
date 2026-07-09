@@ -231,7 +231,13 @@ async function runAnalysis() {
       .catch((err) => console.error("Не удалось сохранить PDF сессии локально (возможно, не хватило места)", err));
     currentPdfFilePersisted = true;
   }
-  await saveSessionMeta();
+  // Not awaited either: some browsers serialize IndexedDB transactions on a
+  // connection even across different object stores, so awaiting this small
+  // metadata write right after kicking off a 100+MB file write above could
+  // sit stuck behind it - "Подготовка…" never advancing to the per-page
+  // progress was exactly that (confirmed: on both a phone and a laptop with
+  // the same large PDF, so it wasn't a one-device fluke).
+  saveSessionMeta();
 
   const buckets = [];
   const pageRecords = [];
@@ -280,7 +286,10 @@ async function runAnalysis() {
   }
   pendingResumeCollected = null;
 
-  await saveSessionMeta();
+  // Not awaited - same reasoning as the initial save above: results are
+  // already on screen at this point, so the button shouldn't stay disabled
+  // waiting on a metadata write that might be queued behind the file write.
+  saveSessionMeta();
   renderLibrary();
   analyzeBtn.disabled = false;
 }
