@@ -220,7 +220,7 @@ async function runAnalysis() {
   state.buckets = [];
   state.pageRecords = [];
   if (!currentSessionId) {
-    currentSessionId = crypto.randomUUID();
+    currentSessionId = generateSessionId();
     sessionCreatedAt = Date.now();
   }
   if (!currentPdfFilePersisted && currentPdfBytesForSession && currentFileKey) {
@@ -292,6 +292,27 @@ async function runAnalysis() {
   saveSessionMeta();
   renderLibrary();
   analyzeBtn.disabled = false;
+}
+
+// crypto.randomUUID() only works in a "secure context" (HTTPS or localhost)
+// and throws everywhere else - including the plain http://<lan-ip> address
+// Start.command/.bat normally opens this app on for phone/laptop sync. That
+// silently crashed runAnalysis() right after it set the "Подготовка…" label,
+// with nothing after ever running - looked like an infinite hang on every
+// device reached that way, reboot or not, since it reproduces every time.
+// A session id is just a local IndexedDB key, not a security token, so a
+// non-cryptographic fallback is fine.
+function generateSessionId() {
+  try {
+    if (window.isSecureContext && crypto.randomUUID) return crypto.randomUUID();
+  } catch (err) {
+    // fall through to the manual generator below
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
 }
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
