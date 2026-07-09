@@ -1,7 +1,7 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
-const APP_VERSION = "1.3.0";
+const APP_VERSION = "1.3.1";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -698,6 +698,8 @@ function autocropCanvas(canvas) {
 // pixel/gradient hashing sees "different" parts. Comparing small color grids across a
 // handful of shift offsets and keeping the best alignment makes matching shift-tolerant.
 const COLOR_MODE_BIN = 32; // quantization step for finding the icon's dominant color
+const COLOR_MODE_AMBIGUOUS_SHARE = 0.10; // below this, no single bin is trustworthy on its own
+const COLOR_MODE_MERGE_RADIUS = 45; // chebyshev color-distance (0-255) used by the mode-seek fallback
 
 function computeSignature(canvas) {
   const cw = canvas.width, ch = canvas.height;
@@ -717,12 +719,14 @@ function computeSignature(canvas) {
   // median winning bin covers 38% of the icon, only ~2% of icons are
   // ambiguous (<10%), and it fixed concrete cases the other two got wrong.
   const bins = new Map(); // quantized key -> {n, rSum, gSum, bSum}
+  const fgPixels = []; // flat [r,g,b, r,g,b, ...] - only walked again for the rare ambiguous fallback below
   let fgCount = 0;
   for (let i = 0; i < odata.length; i += 4) {
     const r = odata[i], g = odata[i + 1], b = odata[i + 2];
     const dr = Math.abs(r - BOX_BG[0]), dg = Math.abs(g - BOX_BG[1]), db = Math.abs(b - BOX_BG[2]);
     if (Math.max(dr, dg, db) <= FG_DIFF_THRESHOLD) continue;
     fgCount++;
+    fgPixels.push(r, g, b);
     const key = ((r / COLOR_MODE_BIN) | 0) * 10000 + ((g / COLOR_MODE_BIN) | 0) * 100 + ((b / COLOR_MODE_BIN) | 0);
     let entry = bins.get(key);
     if (!entry) { entry = { n: 0, rSum: 0, gSum: 0, bSum: 0 }; bins.set(key, entry); }
@@ -734,7 +738,21 @@ function computeSignature(canvas) {
   } else {
     let best = null;
     for (const entry of bins.values()) if (!best || entry.n > best.n) best = entry;
-    avgColor = [best.rSum / best.n, best.gSum / best.n, best.bSum / best.n];
+    if (best.n / fgCount >= COLOR_MODE_AMBIGUOUS_SHARE) {
+      avgColor = [best.rSum / best.n, best.gSum / best.n, best.bSum / best.n];
+    } else {
+      // No bin dominates: a curved or translucent part (a round dome, say)
+      // shades continuously, splitting its true surface color across many
+      // adjacent small bins, while a single dark groove/shadow bin can still
+      // "win" outright - real case: a lime-green translucent dome averaged
+      // out to near-black RGB(6,10,8) this way. Mode-seek instead: score
+      // each bin's neighborhood by how many foreground pixels sit within
+      // COLOR_MODE_MERGE_RADIUS of it, and average that whole neighborhood
+      // around the highest-scoring center. Distance is always measured from
+      // one fixed center (never chained bin-to-bin), so it can't drift all
+      // the way from a bright face to an unrelated dark shadow.
+      avgColor = modeSeekColor(bins, fgPixels);
+    }
   }
 
   const scale = Math.min((SIG_SIZE - 2 * SIG_MARGIN) / cw, (SIG_SIZE - 2 * SIG_MARGIN) / ch);
@@ -757,6 +775,25 @@ function computeSignature(canvas) {
     fgGrid[p] = Math.max(dr, dg, db) > FG_DIFF_THRESHOLD ? 1 : 0;
   }
   return { grid, fgGrid, avgColor };
+}
+
+function modeSeekColor(bins, fgPixels) {
+  let bestScore = -1, bestCenter = null;
+  for (const entry of bins.values()) {
+    const cr = entry.rSum / entry.n, cg = entry.gSum / entry.n, cb = entry.bSum / entry.n;
+    let score = 0;
+    for (let i = 0; i < fgPixels.length; i += 3) {
+      const dr = Math.abs(fgPixels[i] - cr), dg = Math.abs(fgPixels[i + 1] - cg), db = Math.abs(fgPixels[i + 2] - cb);
+      if (Math.max(dr, dg, db) <= COLOR_MODE_MERGE_RADIUS) score++;
+    }
+    if (score > bestScore) { bestScore = score; bestCenter = [cr, cg, cb]; }
+  }
+  let rSum = 0, gSum = 0, bSum = 0, n = 0;
+  for (let i = 0; i < fgPixels.length; i += 3) {
+    const dr = Math.abs(fgPixels[i] - bestCenter[0]), dg = Math.abs(fgPixels[i + 1] - bestCenter[1]), db = Math.abs(fgPixels[i + 2] - bestCenter[2]);
+    if (Math.max(dr, dg, db) <= COLOR_MODE_MERGE_RADIUS) { rSum += fgPixels[i]; gSum += fgPixels[i + 1]; bSum += fgPixels[i + 2]; n++; }
+  }
+  return n > 0 ? [rSum / n, gSum / n, bSum / n] : bestCenter;
 }
 
 // Mean absolute color difference between two signature grids, minimized over small
@@ -889,6 +926,13 @@ function colorCategory(avgColor) {
     return "Серый";
   }
   if (h >= 18 && h < 50 && l >= 18 && l <= 62 && s < 0.65) return "Коричневый / тан";
+  // Plain LEGO "Tan" is a much lighter, brighter beige than the dark/medium
+  // brown above (verified on real parts: RGB ~236,212,167 -> h=39.5deg,
+  // s=0.6-0.7, l=79%) - well past the l<=62 cutoff, so it fell through to
+  // Orange/Yellow instead (~22% of a real-file sample landed here wrong).
+  // True vivid orange at this hue sits at l~63-64% with s>0.8, so gating on
+  // l>68 keeps it out while still catching the light-tan cluster up to white.
+  if (h >= 30 && h < 46 && l > 68 && l <= 88) return "Коричневый / тан";
   if (h < 18 || h >= 350) return "Красный";
   // LEGO's actual "Yellow" is a warm golden shade that measures ~45-50° hue,
   // right where a textbook orange/yellow split would put it - verified on a
