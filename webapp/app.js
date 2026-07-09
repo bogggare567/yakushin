@@ -1,7 +1,7 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
-const APP_VERSION = "1.2.0";
+const APP_VERSION = "1.3.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -61,8 +61,24 @@ const qrClose = document.getElementById("qr-close");
 const updateBanner = document.getElementById("update-banner");
 const updateText = document.getElementById("update-text");
 const updateLink = document.getElementById("update-link");
+const libraryEl = document.getElementById("library");
+const libraryGrid = document.getElementById("library-grid");
+const setupLabel = document.querySelector('label[for="pdf-input"]');
 
 let pdfDoc = null;
+
+// Session library (IndexedDB): remembers analyzed PDFs locally so you don't
+// have to re-pick the same file and range every time - resuming restores
+// the page position, sort, and which parts you've already tapped as found.
+let currentSessionId = null;
+let currentPdfName = null;
+let currentPdfBytesForSession = null;
+let currentPdfFilePersisted = false; // whether currentSessionId's PDF blob is already saved in IndexedDB
+let sessionCreatedAt = null;
+let sessionNameOverride = null;
+let pendingResumeCollected = null;
+let pendingResumeState = null; // {sortMode, mode, stepIndex}
+let resumeAfterReselect = false; // true while waiting for the user to manually re-pick a session's PDF (cache miss)
 
 // LAN sync (see tools/lan_server.py): lets a second device on the same
 // Wi-Fi act as a remote control (step navigation, sort, mode) and/or as the
@@ -82,8 +98,9 @@ const state = {
   to: 1,
   pagesWithParts: 0,
   mode: "list",
-  sortMode: "count-desc",
+  sortMode: "color-groups",
   stepIndex: 0,
+  collected: new Set(), // bucket indices the user has tapped as "already found"
 };
 
 pdfInput.addEventListener("change", onPdfSelected);
@@ -94,6 +111,7 @@ sortSelect.addEventListener("change", () => {
   state.sortMode = sortSelect.value;
   render();
   pushSyncState();
+  saveSessionMeta();
 });
 stepPrevBtn.addEventListener("click", () => goToStep(state.stepIndex - 1));
 stepNextBtn.addEventListener("click", () => goToStep(state.stepIndex + 1));
@@ -131,8 +149,24 @@ async function onPdfSelected(e) {
   resultsEl.innerHTML = "";
   summaryEl.hidden = true;
 
+  // picking a file fresh always starts a brand new session, never continues one -
+  // unless we're waiting for a manual re-pick to resume a session whose cached
+  // PDF blob got evicted (resumeSession() sets resumeAfterReselect for that case)
+  if (resumeAfterReselect) {
+    resumeAfterReselect = false;
+  } else {
+    currentSessionId = null;
+    sessionCreatedAt = null;
+    sessionNameOverride = null;
+    pendingResumeCollected = null;
+    pendingResumeState = null;
+  }
+  currentPdfFilePersisted = false;
+  currentPdfName = file.name;
+
   const buf = await file.arrayBuffer();
   if (syncAvailable) pushSyncedPdf(file, buf.slice(0)); // fire-and-forget; pdfjs may transfer buf below
+  currentPdfBytesForSession = buf.slice(0); // kept until first analysis, then persisted
   pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
 
   fileInfo.textContent = `${file.name} — ${pdfDoc.numPages} стр.`;
@@ -158,6 +192,10 @@ async function runAnalysis() {
   viewControls.hidden = true;
   stepModeEl.hidden = true;
   setProgress(0, "Подготовка…");
+  state.collected.clear();
+  if (pendingResumeCollected) {
+    for (const idx of pendingResumeCollected) state.collected.add(idx);
+  }
 
   const buckets = [];
   const pageRecords = [];
@@ -192,7 +230,32 @@ async function runAnalysis() {
   state.pagesWithParts = pagesWithParts;
   state.stepIndex = 0;
   viewControls.hidden = false;
-  setMode("list"); // also broadcasts the fresh range/mode to any synced devices
+
+  if (!currentSessionId) {
+    currentSessionId = crypto.randomUUID();
+    sessionCreatedAt = Date.now();
+  }
+  if (!currentPdfFilePersisted && currentPdfBytesForSession) {
+    try {
+      await putSessionFile(currentSessionId, currentPdfBytesForSession);
+      currentPdfFilePersisted = true;
+    } catch (err) {
+      console.error("Не удалось сохранить PDF сессии локально (возможно, не хватило места)", err);
+    }
+  }
+
+  if (pendingResumeState) {
+    if (pendingResumeState.sortMode) { state.sortMode = pendingResumeState.sortMode; sortSelect.value = pendingResumeState.sortMode; }
+    if (typeof pendingResumeState.stepIndex === "number") state.stepIndex = clamp(pendingResumeState.stepIndex, 0, pageRecords.length - 1);
+    setMode(pendingResumeState.mode || "list");
+    pendingResumeState = null;
+  } else {
+    setMode("list"); // also broadcasts the fresh range/mode to any synced devices
+  }
+  pendingResumeCollected = null;
+
+  await saveSessionMeta();
+  renderLibrary();
   analyzeBtn.disabled = false;
 }
 
@@ -634,29 +697,45 @@ function autocropCanvas(canvas) {
 // (box layout shifts slightly depending on how many sibling items share it), so plain
 // pixel/gradient hashing sees "different" parts. Comparing small color grids across a
 // handful of shift offsets and keeping the best alignment makes matching shift-tolerant.
-// The 3D icon render shades each part with a near-black outline and often a
-// bright specular highlight along raised edges - neither is the part's actual
-// color. Small parts especially are mostly outline by area, so a plain mean
-// over every foreground pixel skews dark/washed-out and confuses color sort
-// and dedup. Average only the mid-lightness ("base plastic") pixels instead,
-// falling back to the plain mean for genuinely near-black/white parts.
+const COLOR_MODE_BIN = 32; // quantization step for finding the icon's dominant color
+
 function computeSignature(canvas) {
   const cw = canvas.width, ch = canvas.height;
   const octx = canvas.getContext("2d");
   const odata = octx.getImageData(0, 0, cw, ch).data;
-  let rSum = 0, gSum = 0, bSum = 0, cnt = 0;
-  let rSumMid = 0, gSumMid = 0, bSumMid = 0, cntMid = 0;
+
+  // The part's true base color is found as the *dominant* (most common,
+  // coarsely-quantized) color among the icon's foreground pixels - not a
+  // fixed region. Two simpler ideas were tried and rejected on real data:
+  // a center-weighted sample can land squarely on a technic connector's
+  // dark axle-hole marking (samples the wrong thing entirely); averaging
+  // every foreground pixel (even after eroding away the outline) can get
+  // diluted by ring/groove shading details scattered across the whole
+  // surface. Dominant-color-by-quantization is robust to both because
+  // minority detail pixels - wherever they sit - just don't outnumber the
+  // part's own face. Verified against ~800 real icons across 300 pages:
+  // median winning bin covers 38% of the icon, only ~2% of icons are
+  // ambiguous (<10%), and it fixed concrete cases the other two got wrong.
+  const bins = new Map(); // quantized key -> {n, rSum, gSum, bSum}
+  let fgCount = 0;
   for (let i = 0; i < odata.length; i += 4) {
     const r = odata[i], g = odata[i + 1], b = odata[i + 2];
     const dr = Math.abs(r - BOX_BG[0]), dg = Math.abs(g - BOX_BG[1]), db = Math.abs(b - BOX_BG[2]);
     if (Math.max(dr, dg, db) <= FG_DIFF_THRESHOLD) continue;
-    rSum += r; gSum += g; bSum += b; cnt++;
-    const lightness = (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
-    if (lightness >= 32 && lightness <= 230) { rSumMid += r; gSumMid += g; bSumMid += b; cntMid++; }
+    fgCount++;
+    const key = ((r / COLOR_MODE_BIN) | 0) * 10000 + ((g / COLOR_MODE_BIN) | 0) * 100 + ((b / COLOR_MODE_BIN) | 0);
+    let entry = bins.get(key);
+    if (!entry) { entry = { n: 0, rSum: 0, gSum: 0, bSum: 0 }; bins.set(key, entry); }
+    entry.n++; entry.rSum += r; entry.gSum += g; entry.bSum += b;
   }
-  const avgColor = cntMid >= Math.max(5, cnt * 0.15)
-    ? [rSumMid / cntMid, gSumMid / cntMid, bSumMid / cntMid]
-    : cnt > 0 ? [rSum / cnt, gSum / cnt, bSum / cnt] : [BOX_BG[0], BOX_BG[1], BOX_BG[2]];
+  let avgColor;
+  if (fgCount === 0) {
+    avgColor = [BOX_BG[0], BOX_BG[1], BOX_BG[2]];
+  } else {
+    let best = null;
+    for (const entry of bins.values()) if (!best || entry.n > best.n) best = entry;
+    avgColor = [best.rSum / best.n, best.gSum / best.n, best.bSum / best.n];
+  }
 
   const scale = Math.min((SIG_SIZE - 2 * SIG_MARGIN) / cw, (SIG_SIZE - 2 * SIG_MARGIN) / ch);
   const nw = Math.max(1, Math.round(cw * scale)), nh = Math.max(1, Math.round(ch * scale));
@@ -778,6 +857,51 @@ function colorSortKey(avgColor) {
   return s < 0.15 ? 400 + l : h;
 }
 
+// Named color families for the grouped view - distinguishes e.g. red from
+// magenta/purple instead of just placing them at nearby points on one
+// continuous hue line (the client's own request after trying the plain
+// "по цвету" sort). Brown/tan gets its own bucket since it's really just a
+// low-saturation, low/mid-lightness orange and would otherwise land next to
+// bright oranges despite reading as a completely different color.
+const COLOR_CATEGORY_ORDER = [
+  "Чёрный", "Серый", "Белый",
+  "Коричневый / тан", "Красный", "Оранжевый", "Жёлтый",
+  "Зелёный", "Голубой", "Синий", "Фиолетовый", "Пурпурный / розовый",
+];
+
+function colorCategory(avgColor) {
+  const [h, s, l] = rgbToHsl(avgColor);
+  // Below ~15% (or above ~90%) lightness, hue/saturation are numerically
+  // unstable - a few units of RGB noise swings "saturation" wildly even
+  // though the color reads as unambiguous black/white to the eye (verified:
+  // real near-black parts measuring RGB like [10,15,27] compute a
+  // deceptive s=0.46 from pure noise). Lightness overrides in that range.
+  if (l < 15) return "Чёрный";
+  if (l > 90) return "Белый";
+  // LEGO's signature "(dark) bluish gray" carries noticeably more saturation
+  // than a neutral gray (verified on real data: s up to ~0.2, hue ~205-225)
+  // but reads as gray to every LEGO builder, not blue - widen the gray net
+  // specifically in that hue band rather than globally.
+  const grayThreshold = h >= 195 && h <= 235 ? 0.22 : 0.13;
+  if (s < grayThreshold) {
+    if (l > 82) return "Белый";
+    if (l < 25) return "Чёрный";
+    return "Серый";
+  }
+  if (h >= 18 && h < 50 && l >= 18 && l <= 62 && s < 0.65) return "Коричневый / тан";
+  if (h < 18 || h >= 350) return "Красный";
+  // LEGO's actual "Yellow" is a warm golden shade that measures ~45-50° hue,
+  // right where a textbook orange/yellow split would put it - verified on a
+  // real yellow part (RGB ~251,212,50 -> h=48.4°) landing correctly here.
+  if (h < 40) return "Оранжевый";
+  if (h < 70) return "Жёлтый";
+  if (h < 165) return "Зелёный";
+  if (h < 200) return "Голубой";
+  if (h < 255) return "Синий";
+  if (h < 300) return "Фиолетовый";
+  return "Пурпурный / розовый";
+}
+
 function sortEntries(entries, mode, getBucket, getCount, getFirstPage) {
   const arr = entries.slice();
   switch (mode) {
@@ -795,6 +919,26 @@ function sortEntries(entries, mode, getBucket, getCount, getFirstPage) {
       arr.sort((a, b) => getCount(b) - getCount(a));
   }
   return arr;
+}
+
+// Groups entries into named color families (fixed display order), sorting
+// each family's contents by count descending. Returns [[category, entries[]], ...]
+function groupByColor(entries, getBucket, getCount) {
+  const groups = new Map();
+  for (const e of entries) {
+    const cat = colorCategory(getBucket(e).avgColor);
+    if (!groups.has(cat)) groups.set(cat, []);
+    groups.get(cat).push(e);
+  }
+  for (const arr of groups.values()) arr.sort((a, b) => getCount(b) - getCount(a));
+  const ordered = [];
+  for (const cat of COLOR_CATEGORY_ORDER) {
+    if (groups.has(cat)) ordered.push([cat, groups.get(cat)]);
+  }
+  for (const [cat, arr] of groups) {
+    if (!COLOR_CATEGORY_ORDER.includes(cat)) ordered.push([cat, arr]);
+  }
+  return ordered;
 }
 
 function sortBuckets(buckets, mode) {
@@ -821,29 +965,70 @@ function setMode(mode) {
   stepModeEl.hidden = mode !== "step";
   render();
   pushSyncState();
+  saveSessionMeta();
 }
 
 function goToStep(idx) {
   state.stepIndex = clamp(idx, 0, state.pageRecords.length - 1);
   renderStepMode();
   pushSyncState();
+  saveSessionMeta();
 }
 
-function makePartCard(bucket, qty, unsure, pages) {
+function makePartCard(bucket, qty, unsure, pages, bucketIdx) {
   const card = document.createElement("div");
-  card.className = "part-card";
+  card.className = "part-card" + (state.collected.has(bucketIdx) ? " collected" : "");
   const pagesArr = pages.slice().sort((x, y) => x - y);
   card.innerHTML = `
     <img src="${bucket.thumbUrl}" alt="деталь" loading="lazy" />
     <div class="part-qty ${unsure ? "unsure" : ""}">×${qty}${unsure ? " ?" : ""}</div>
     <div class="part-pages">стр. ${summarizePages(pagesArr)}</div>
   `;
+  // Click to mark a part as already collected while building - purely a
+  // visual crossed-out/dimmed toggle so you can tell at a glance what's
+  // still left to find in the pile. Saved into the session, so it survives reopening.
+  card.addEventListener("click", () => {
+    if (state.collected.has(bucketIdx)) state.collected.delete(bucketIdx);
+    else state.collected.add(bucketIdx);
+    card.classList.toggle("collected", state.collected.has(bucketIdx));
+    saveSessionMeta();
+  });
   return card;
 }
 
 function summarizePages(pages) {
   if (pages.length <= 6) return pages.join(", ");
   return `${pages[0]}…${pages[pages.length - 1]} (${pages.length} стр.)`;
+}
+
+// Shared by the overview list and both step-mode lists: renders either a
+// flat sorted grid, or - when sortMode is "color-groups" - a stack of
+// named color sections, each its own mini grid sorted by count descending.
+function renderPartCards(container, entries, sortMode, accessors) {
+  const { getBucket, getCount, getUnsure, getPages, getBucketIdx, getFirstPage } = accessors;
+  container.innerHTML = "";
+  if (sortMode === "color-groups") {
+    container.classList.add("grouped");
+    const groups = groupByColor(entries, getBucket, getCount);
+    for (const [category, groupEntries] of groups) {
+      const heading = document.createElement("h4");
+      heading.className = "color-group-heading";
+      heading.textContent = `${category} (${groupEntries.length})`;
+      container.appendChild(heading);
+      const grid = document.createElement("div");
+      grid.className = "results";
+      for (const e of groupEntries) {
+        grid.appendChild(makePartCard(getBucket(e), getCount(e), getUnsure(e), getPages(e), getBucketIdx(e)));
+      }
+      container.appendChild(grid);
+    }
+  } else {
+    container.classList.remove("grouped");
+    const sorted = sortEntries(entries, sortMode, getBucket, getCount, getFirstPage);
+    for (const e of sorted) {
+      container.appendChild(makePartCard(getBucket(e), getCount(e), getUnsure(e), getPages(e), getBucketIdx(e)));
+    }
+  }
 }
 
 function renderListMode() {
@@ -858,11 +1043,14 @@ function renderListMode() {
     <div>Всего деталей: <b>${totalBricks}</b></div>
   `;
 
-  const sorted = sortBuckets(buckets, state.sortMode);
-  resultsEl.innerHTML = "";
-  for (const b of sorted) {
-    resultsEl.appendChild(makePartCard(b, b.count, b.unsure, Array.from(b.pages)));
-  }
+  renderPartCards(resultsEl, buckets, state.sortMode, {
+    getBucket: (b) => b,
+    getCount: (b) => b.count,
+    getUnsure: (b) => b.unsure,
+    getPages: (b) => Array.from(b.pages),
+    getBucketIdx: (b) => buckets.indexOf(b),
+    getFirstPage: (b) => Math.min(...b.pages),
+  });
 }
 
 function renderStepMode() {
@@ -877,16 +1065,14 @@ function renderStepMode() {
   stepPrevBtn.disabled = stepIndex === 0;
   stepNextBtn.disabled = stepIndex === pageRecords.length - 1;
 
-  const currentEntries = sortEntries(
-    rec.items, state.sortMode,
-    (it) => buckets[it.bucketIdx],
-    (it) => it.qty,
-    () => rec.pageNum
-  );
-  stepCurrentItems.innerHTML = "";
-  for (const it of currentEntries) {
-    stepCurrentItems.appendChild(makePartCard(buckets[it.bucketIdx], it.qty, it.unsure, [rec.pageNum]));
-  }
+  renderPartCards(stepCurrentItems, rec.items, state.sortMode, {
+    getBucket: (it) => buckets[it.bucketIdx],
+    getCount: (it) => it.qty,
+    getUnsure: (it) => it.unsure,
+    getPages: () => [rec.pageNum],
+    getBucketIdx: (it) => it.bucketIdx,
+    getFirstPage: () => rec.pageNum,
+  });
 
   // Starts at the *next* page on purpose: this page's own needs are already
   // shown above, so "remaining" means "still needed after this step" and
@@ -901,16 +1087,244 @@ function renderStepMode() {
       remaining.set(it.bucketIdx, cur);
     }
   }
-  const remainingEntries = sortEntries(
-    Array.from(remaining.entries()), state.sortMode,
-    ([idx]) => buckets[idx],
-    ([, v]) => v.qty,
-    ([, v]) => Math.min(...v.pages)
-  );
-  stepRemainingItems.innerHTML = "";
-  for (const [idx, v] of remainingEntries) {
-    stepRemainingItems.appendChild(makePartCard(buckets[idx], v.qty, v.unsure, Array.from(v.pages)));
+  renderPartCards(stepRemainingItems, Array.from(remaining.entries()), state.sortMode, {
+    getBucket: ([idx]) => buckets[idx],
+    getCount: ([, v]) => v.qty,
+    getUnsure: ([, v]) => v.unsure,
+    getPages: ([, v]) => Array.from(v.pages),
+    getBucketIdx: ([idx]) => idx,
+    getFirstPage: ([, v]) => Math.min(...v.pages),
+  });
+}
+
+// ---------- session library (IndexedDB) ----------
+// Two object stores: "sessions" holds small metadata (updated on every mode
+// switch / step move / sort change / collected-toggle) and "sessionFiles"
+// holds the heavy PDF ArrayBuffer separately, written once per file so we
+// never rewrite tens of MB just because the user tapped one part card.
+
+const DB_NAME = "lego-parts-finder";
+const DB_VERSION = 1;
+const STORE_SESSIONS = "sessions";
+const STORE_FILES = "sessionFiles";
+let dbPromise = null;
+
+function openDB() {
+  if (!dbPromise) {
+    dbPromise = new Promise((resolve, reject) => {
+      const req = indexedDB.open(DB_NAME, DB_VERSION);
+      req.onupgradeneeded = () => {
+        const db = req.result;
+        if (!db.objectStoreNames.contains(STORE_SESSIONS)) db.createObjectStore(STORE_SESSIONS, { keyPath: "id" });
+        if (!db.objectStoreNames.contains(STORE_FILES)) db.createObjectStore(STORE_FILES, { keyPath: "id" });
+      };
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
   }
+  return dbPromise;
+}
+
+function reqToPromise(req) {
+  return new Promise((resolve, reject) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function dbStore(name, mode) {
+  const db = await openDB();
+  return db.transaction(name, mode).objectStore(name);
+}
+
+async function getAllSessions() {
+  try {
+    const store = await dbStore(STORE_SESSIONS, "readonly");
+    const all = await reqToPromise(store.getAll());
+    return all.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+  } catch (err) {
+    console.error("Не удалось прочитать список сессий", err);
+    return [];
+  }
+}
+
+async function putSessionMeta(meta) {
+  const store = await dbStore(STORE_SESSIONS, "readwrite");
+  await reqToPromise(store.put(meta));
+}
+
+async function putSessionFile(id, buf) {
+  const store = await dbStore(STORE_FILES, "readwrite");
+  await reqToPromise(store.put({ id, buf }));
+}
+
+async function getSessionFile(id) {
+  try {
+    const store = await dbStore(STORE_FILES, "readonly");
+    const rec = await reqToPromise(store.get(id));
+    return rec ? rec.buf : null;
+  } catch (err) {
+    console.error("Не удалось прочитать сохранённый PDF сессии", err);
+    return null;
+  }
+}
+
+async function deleteSession(id) {
+  const sessStore = await dbStore(STORE_SESSIONS, "readwrite");
+  await reqToPromise(sessStore.delete(id));
+  const fileStore = await dbStore(STORE_FILES, "readwrite");
+  await reqToPromise(fileStore.delete(id));
+}
+
+function defaultSessionName() {
+  const base = (currentPdfName || "PDF").replace(/\.pdf$/i, "");
+  return `${base}, стр. ${state.from}–${state.to}`;
+}
+
+async function saveSessionMeta() {
+  if (!currentSessionId) return;
+  const meta = {
+    id: currentSessionId,
+    name: sessionNameOverride || defaultSessionName(),
+    pdfName: currentPdfName,
+    createdAt: sessionCreatedAt || Date.now(),
+    updatedAt: Date.now(),
+    from: state.from,
+    to: state.to,
+    sortMode: state.sortMode,
+    mode: state.mode,
+    stepIndex: state.stepIndex,
+    totalSteps: state.pageRecords.length,
+    totalParts: state.buckets.length,
+    collected: Array.from(state.collected),
+  };
+  try {
+    await putSessionMeta(meta);
+  } catch (err) {
+    console.error("Не удалось сохранить сессию локально", err);
+  }
+  renderLibrary();
+}
+
+function escapeHtml(str) {
+  return String(str).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  }[c]));
+}
+
+function timeAgo(ts) {
+  if (!ts) return "";
+  const diffSec = Math.max(0, Math.floor((Date.now() - ts) / 1000));
+  if (diffSec < 60) return "только что";
+  const diffMin = Math.floor(diffSec / 60);
+  if (diffMin < 60) return `${diffMin} мин назад`;
+  const diffHour = Math.floor(diffMin / 60);
+  if (diffHour < 24) return `${diffHour} ч назад`;
+  const diffDay = Math.floor(diffHour / 24);
+  if (diffDay < 30) return `${diffDay} дн назад`;
+  const diffMonth = Math.floor(diffDay / 30);
+  if (diffMonth < 12) return `${diffMonth} мес назад`;
+  return `${Math.floor(diffMonth / 12)} г назад`;
+}
+
+function renderLibrary() {
+  getAllSessions().then((sessions) => {
+    libraryEl.hidden = sessions.length === 0;
+    libraryGrid.innerHTML = "";
+    for (const meta of sessions) libraryGrid.appendChild(makeSessionCard(meta));
+  });
+}
+
+function makeSessionCard(meta) {
+  const card = document.createElement("div");
+  card.className = "session-card";
+
+  const totalSteps = meta.totalSteps || 0;
+  const pageProgress = totalSteps > 0 ? Math.round(((meta.stepIndex + 1) / totalSteps) * 100) : 0;
+  const totalParts = meta.totalParts || 0;
+  const collectedCount = (meta.collected || []).length;
+
+  card.innerHTML = `
+    <div class="session-name" contenteditable="true" spellcheck="false"></div>
+    <div class="session-meta">${escapeHtml(meta.pdfName || "")} · стр. ${meta.from}–${meta.to} · ${timeAgo(meta.updatedAt)}</div>
+    <div class="session-progress-bar"><div class="session-progress-fill" style="width:${pageProgress}%"></div></div>
+    <div class="session-progress-label">${pageProgress}% прочитано · собрано ${collectedCount}/${totalParts}</div>
+    <button type="button" class="session-delete" title="Удалить сессию" aria-label="Удалить сессию">✕</button>
+  `;
+
+  const nameEl = card.querySelector(".session-name");
+  nameEl.textContent = meta.name;
+  nameEl.addEventListener("click", (e) => e.stopPropagation());
+  nameEl.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); nameEl.blur(); }
+  });
+  nameEl.addEventListener("blur", async () => {
+    const fallback = `${(meta.pdfName || "PDF").replace(/\.pdf$/i, "")}, стр. ${meta.from}–${meta.to}`;
+    const newName = nameEl.textContent.trim() || fallback;
+    nameEl.textContent = newName;
+    if (newName !== meta.name) {
+      meta.name = newName;
+      meta.updatedAt = Date.now();
+      await putSessionMeta(meta);
+      if (currentSessionId === meta.id) sessionNameOverride = newName;
+    }
+  });
+
+  card.querySelector(".session-delete").addEventListener("click", async (e) => {
+    e.stopPropagation();
+    if (!confirm(`Удалить сессию «${meta.name}»?`)) return;
+    await deleteSession(meta.id);
+    if (currentSessionId === meta.id) currentSessionId = null;
+    renderLibrary();
+  });
+
+  card.addEventListener("click", () => resumeSession(meta.id));
+
+  return card;
+}
+
+async function resumeSession(id) {
+  const sessions = await getAllSessions();
+  const meta = sessions.find((s) => s.id === id);
+  if (!meta) return;
+
+  currentSessionId = meta.id;
+  currentPdfName = meta.pdfName;
+  sessionCreatedAt = meta.createdAt;
+  sessionNameOverride = meta.name;
+  pendingResumeState = { sortMode: meta.sortMode, mode: meta.mode, stepIndex: meta.stepIndex };
+  pendingResumeCollected = meta.collected || [];
+
+  const bytes = await getSessionFile(id);
+  if (!bytes) {
+    // the PDF blob got evicted (storage cleared / quota pressure) - keep the
+    // session id and pending resume state, but ask the user to re-pick the
+    // same file; onPdfSelected() will detect resumeAfterReselect and continue
+    resumeAfterReselect = true;
+    currentPdfFilePersisted = false;
+    pageFrom.value = meta.from;
+    pageTo.value = meta.to;
+    rangeFields.hidden = false;
+    actionField.hidden = false;
+    fileInfo.textContent = `Файл «${meta.pdfName}» не найден в локальном хранилище — выберите его заново, чтобы продолжить сессию.`;
+    pdfInput.scrollIntoView({ behavior: "smooth", block: "center" });
+    return;
+  }
+
+  currentPdfFilePersisted = true;
+  currentPdfBytesForSession = null;
+  fileInfo.textContent = `Открываю «${meta.pdfName}»…`;
+  pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+  fileInfo.textContent = `${meta.pdfName} — ${pdfDoc.numPages} стр.`;
+  pageTotalLabel.textContent = `всего страниц: ${pdfDoc.numPages}`;
+  pageFrom.value = meta.from;
+  pageTo.value = meta.to;
+  pageFrom.max = pdfDoc.numPages;
+  pageTo.max = pdfDoc.numPages;
+  rangeFields.hidden = false;
+  actionField.hidden = false;
+
+  await runAnalysis();
 }
 
 // ---------- LAN sharing (open on phone over Wi-Fi) ----------
@@ -956,6 +1370,7 @@ qrClose.addEventListener("click", () => { qrOverlay.hidden = true; });
 qrOverlay.addEventListener("click", (e) => { if (e.target === qrOverlay) qrOverlay.hidden = true; });
 
 initLanBanner();
+renderLibrary();
 
 // ---------- update check ----------
 

@@ -224,6 +224,30 @@ button:active:not(:disabled) {
   gap: 12px;
 }
 
+/* grouped-by-color mode: the outer container just stacks heading+grid pairs;
+   each nested .results grid keeps the normal card-grid layout above */
+.results.grouped {
+  display: block;
+  margin-top: 0;
+}
+
+.results.grouped > .results {
+  margin-top: 0;
+}
+
+.color-group-heading {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 22px 0 10px;
+}
+
+.color-group-heading:first-child {
+  margin-top: 0;
+}
+
 .part-card {
   background: var(--panel);
   border: 1px solid var(--border);
@@ -234,8 +258,23 @@ button:active:not(:disabled) {
   align-items: center;
   gap: 6px;
   position: relative;
+  cursor: pointer;
+  user-select: none;
   animation: fadeInUp 0.3s ease backwards;
-  transition: transform var(--transition-fast) ease, box-shadow var(--transition-fast) ease, border-color var(--transition-fast) ease;
+  transition: transform var(--transition-fast) ease, box-shadow var(--transition-fast) ease, border-color var(--transition-fast) ease, opacity var(--transition-fast) ease;
+}
+
+/* tap a card to mark it as already found while building */
+.part-card.collected {
+  opacity: 0.4;
+}
+
+.part-card.collected img {
+  filter: grayscale(0.8);
+}
+
+.part-card.collected .part-qty {
+  text-decoration: line-through;
 }
 
 .results .part-card:nth-child(n+1) { animation-delay: 0ms; }
@@ -397,9 +436,16 @@ input[type="range"] {
 .step-body {
   display: grid;
   grid-template-columns: minmax(320px, 640px) 1fr;
+  grid-template-areas:
+    "preview current"
+    "remaining remaining";
   gap: 16px;
   align-items: start;
 }
+
+.step-page-preview { grid-area: preview; }
+.step-current-block { grid-area: current; }
+.step-remaining-block { grid-area: remaining; }
 
 .step-page-preview {
   background: var(--panel);
@@ -452,12 +498,6 @@ input[type="range"] {
   transform: translateX(-50%) translateY(0);
 }
 
-.step-lists {
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-}
-
 .step-list-block h3 {
   font-size: 0.9rem;
   margin: 0 0 8px;
@@ -476,8 +516,19 @@ input[type="range"] {
 }
 
 @media (max-width: 720px) {
-  .step-body { grid-template-columns: 1fr; }
+  .step-body {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "preview"
+      "current"
+      "remaining";
+  }
   .step-page-preview img { max-height: 60vh; object-fit: contain; }
+}
+
+/* tablet: preview + current side by side (like desktop), remaining still full-width below */
+@media (min-width: 721px) and (max-width: 980px) {
+  .step-body { grid-template-columns: minmax(240px, 1fr) 1fr; }
 }
 
 /* ---------- zoom overlay ---------- */
@@ -619,4 +670,99 @@ input[type="range"] {
 @keyframes shimmer {
   from { background-position: 200% 0; }
   to { background-position: 0 0; }
+}
+
+/* ---------- session library ---------- */
+
+.library {
+  margin-bottom: 18px;
+  animation: fadeInUp 0.3s ease;
+}
+
+.library h2 {
+  font-size: 1rem;
+  margin: 0 0 10px;
+  color: var(--text-dim);
+}
+
+.library-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.session-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 14px;
+  cursor: pointer;
+  transition: transform var(--transition-fast) ease, box-shadow var(--transition-fast) ease, border-color var(--transition-fast) ease;
+  position: relative;
+}
+
+.session-card:hover {
+  transform: translateY(-2px);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  box-shadow: 0 10px 20px -12px rgba(0, 0, 0, 0.45);
+}
+
+.session-name {
+  font-weight: 700;
+  font-size: 0.95rem;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  width: 100%;
+  padding: 2px 0;
+  margin-bottom: 4px;
+  font-family: inherit;
+}
+
+.session-name:focus {
+  outline: none;
+  border-bottom: 1px solid var(--accent);
+}
+
+.session-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-bottom: 10px;
+}
+
+.session-progress-bar {
+  height: 6px;
+  background: var(--panel-2);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-bottom: 6px;
+}
+
+.session-progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--good));
+}
+
+.session-progress-label {
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.session-delete {
+  position: absolute;
+  top: 10px;
+  right: 10px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1;
+}
+
+.session-delete:hover {
+  background: color-mix(in srgb, red 20%, transparent);
+  color: #ff6b6b;
 }

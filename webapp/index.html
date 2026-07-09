@@ -10,7 +10,7 @@
 <div class="app">
   <header class="topbar">
     <h1>🧱 Список деталей по страницам</h1>
-    <p class="subtitle">Загружает PDF-инструкцию и собирает список уникальных деталей (картинка + количество) для выбранного диапазона страниц. Всё считается прямо в браузере — файл никуда не отправляется.</p>
+    <p class="subtitle">Загружает PDF-инструкцию и собирает список уникальных деталей (картинка + количество) для выбранного диапазона страниц.</p>
   </header>
 
   <div class="lan-banner" id="update-banner" hidden>
@@ -30,6 +30,11 @@
     </div>
     <button id="lan-qr-btn">Показать QR</button>
   </div>
+
+  <section class="library" id="library" hidden>
+    <h2>Ваши сессии</h2>
+    <div class="library-grid" id="library-grid"></div>
+  </section>
 
   <section class="panel" id="setup-panel">
     <div class="field">
@@ -68,9 +73,10 @@
     <div class="sort-control">
       <label for="sort-select">Сортировка</label>
       <select id="sort-select">
+        <option value="color-groups" selected>по цветам (группами)</option>
         <option value="count-desc">по количеству ↓</option>
         <option value="count-asc">по количеству ↑</option>
-        <option value="color">по цвету</option>
+        <option value="color">по цвету (плавно)</option>
         <option value="page">по первой странице</option>
       </select>
     </div>
@@ -92,15 +98,13 @@
         <img id="step-page-img" alt="Страница инструкции" />
         <div class="zoom-hint">нажмите, чтобы увеличить</div>
       </div>
-      <div class="step-lists">
-        <div class="step-list-block">
-          <h3>Нужно на этой странице</h3>
-          <div class="results step-current" id="step-current-items"></div>
-        </div>
-        <div class="step-list-block">
-          <h3>Осталось найти дальше (после этой страницы)</h3>
-          <div class="results step-remaining" id="step-remaining-items"></div>
-        </div>
+      <div class="step-list-block step-current-block">
+        <h3>Нужно на этой странице</h3>
+        <div class="results step-current" id="step-current-items"></div>
+      </div>
+      <div class="step-list-block step-remaining-block">
+        <h3>Осталось найти дальше (после этой страницы)</h3>
+        <div class="results step-remaining" id="step-remaining-items"></div>
       </div>
     </div>
   </section>

@@ -1,5 +1,8 @@
 # LEGO instruction PDFs are copyrighted ("own use only") and huge - never commit them.
 *.pdf
+# Some instruction files get dropped in here with no extension at all - catch those too.
+/Star Destroyer
+/[0-9]*-Super Yacht*
 
 # Private client conversation - not part of the project deliverable.
 разговор с закзчиками.rtf
