@@ -10,8 +10,9 @@ MAC_DEST="desktop/mac/Список деталей.app/Contents/Resources/webapp"
 WIN_DEST="desktop/windows/webapp"
 
 for dest in "$MAC_DEST" "$WIN_DEST"; do
-  mkdir -p "$dest"
+  mkdir -p "$dest/vendor"
   cp "$SRC"/index.html "$SRC"/style.css "$SRC"/app.js "$SRC"/glyph-templates.js "$dest"/
+  cp "$SRC"/vendor/qrcode.js "$dest"/vendor/
 done
 
 chmod +x "desktop/mac/Список деталей.app/Contents/MacOS/launcher"

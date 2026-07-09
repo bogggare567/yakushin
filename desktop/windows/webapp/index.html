@@ -13,6 +13,14 @@
     <p class="subtitle">Загружает PDF-инструкцию и собирает список уникальных деталей (картинка + количество) для выбранного диапазона страниц. Всё считается прямо в браузере — файл никуда не отправляется.</p>
   </header>
 
+  <div class="lan-banner" id="lan-banner" hidden>
+    <div class="lan-banner-text">
+      <b>📱 Открыть на телефоне</b>
+      <span>Тот же Wi-Fi — можно подключиться по этому адресу</span>
+    </div>
+    <button id="lan-qr-btn">Показать QR</button>
+  </div>
+
   <section class="panel" id="setup-panel">
     <div class="field">
       <label for="pdf-input">1. Выберите PDF-инструкцию</label>
@@ -70,8 +78,9 @@
       <button id="step-next" aria-label="Следующая страница">→</button>
     </div>
     <div class="step-body">
-      <div class="step-page-preview">
+      <div class="step-page-preview" id="step-page-preview">
         <img id="step-page-img" alt="Страница инструкции" />
+        <div class="zoom-hint">🔍 нажмите, чтобы увеличить</div>
       </div>
       <div class="step-lists">
         <div class="step-list-block">
@@ -79,12 +88,30 @@
           <div class="results step-current" id="step-current-items"></div>
         </div>
         <div class="step-list-block">
-          <h3>Осталось найти (с этой страницы и до конца диапазона)</h3>
+          <h3>Осталось найти дальше (после этой страницы)</h3>
           <div class="results step-remaining" id="step-remaining-items"></div>
         </div>
       </div>
     </div>
   </section>
+</div>
+
+<div class="zoom-overlay" id="zoom-overlay" hidden>
+  <button class="zoom-close" id="zoom-close" aria-label="Закрыть">✕</button>
+  <div class="zoom-scroll" id="zoom-scroll">
+    <img id="zoom-img" alt="Страница крупным планом" />
+    <div class="zoom-spinner" id="zoom-spinner">Загружаю чёткую версию…</div>
+  </div>
+</div>
+
+<div class="qr-overlay" id="qr-overlay" hidden>
+  <div class="qr-card">
+    <h3>📱 Открыть на телефоне</h3>
+    <p>Отсканируйте камерой телефона (тот же Wi-Fi)</p>
+    <div id="qr-canvas-holder"></div>
+    <div class="qr-url" id="qr-url"></div>
+    <button id="qr-close">Закрыть</button>
+  </div>
 </div>
 
 <script src="https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.min.js"></script>

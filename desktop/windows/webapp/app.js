@@ -43,6 +43,17 @@ const stepLabel = document.getElementById("step-label");
 const stepPageImg = document.getElementById("step-page-img");
 const stepCurrentItems = document.getElementById("step-current-items");
 const stepRemainingItems = document.getElementById("step-remaining-items");
+const stepPagePreview = document.getElementById("step-page-preview");
+const zoomOverlay = document.getElementById("zoom-overlay");
+const zoomImg = document.getElementById("zoom-img");
+const zoomSpinner = document.getElementById("zoom-spinner");
+const zoomClose = document.getElementById("zoom-close");
+const lanBanner = document.getElementById("lan-banner");
+const lanQrBtn = document.getElementById("lan-qr-btn");
+const qrOverlay = document.getElementById("qr-overlay");
+const qrCanvasHolder = document.getElementById("qr-canvas-holder");
+const qrUrl = document.getElementById("qr-url");
+const qrClose = document.getElementById("qr-close");
 
 let pdfDoc = null;
 
@@ -68,6 +79,31 @@ sortSelect.addEventListener("change", () => {
 stepPrevBtn.addEventListener("click", () => goToStep(state.stepIndex - 1));
 stepNextBtn.addEventListener("click", () => goToStep(state.stepIndex + 1));
 stepSlider.addEventListener("input", () => goToStep(parseInt(stepSlider.value, 10)));
+stepPagePreview.addEventListener("click", openZoom);
+zoomClose.addEventListener("click", closeZoom);
+zoomOverlay.addEventListener("click", (e) => { if (e.target === zoomOverlay) closeZoom(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !zoomOverlay.hidden) closeZoom(); });
+
+async function openZoom() {
+  const rec = state.pageRecords[state.stepIndex];
+  if (!rec) return;
+  zoomImg.src = "";
+  zoomSpinner.hidden = false;
+  zoomOverlay.hidden = false;
+  try {
+    const dataUrl = await renderPageZoomDataUrl(rec.pageNum);
+    zoomImg.src = dataUrl;
+  } catch (err) {
+    console.error("Не удалось отрисовать страницу крупным планом", err);
+    zoomImg.src = rec.thumbDataUrl; // fall back to the already-available thumbnail
+  }
+  zoomSpinner.hidden = true;
+}
+
+function closeZoom() {
+  zoomOverlay.hidden = true;
+  zoomImg.src = "";
+}
 
 async function onPdfSelected(e) {
   const file = e.target.files[0];
@@ -166,13 +202,25 @@ async function processPage(pageNum) {
 }
 
 function makePageThumb(canvas) {
-  const targetW = Math.min(640, canvas.width);
+  const targetW = Math.min(900, canvas.width);
   const scale = targetW / canvas.width;
   const tw = Math.round(targetW), th = Math.round(canvas.height * scale);
   const t = document.createElement("canvas");
   t.width = tw; t.height = th;
   t.getContext("2d").drawImage(canvas, 0, 0, tw, th);
-  return t.toDataURL("image/jpeg", 0.72);
+  return t.toDataURL("image/jpeg", 0.8);
+}
+
+const ZOOM_SCALE = 4.5; // re-rendered on demand for the click-to-zoom overlay
+
+async function renderPageZoomDataUrl(pageNum) {
+  const page = await pdfDoc.getPage(pageNum);
+  const viewport = page.getViewport({ scale: ZOOM_SCALE });
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(viewport.width);
+  canvas.height = Math.ceil(viewport.height);
+  await page.render({ canvasContext: canvas.getContext("2d"), viewport }).promise;
+  return canvas.toDataURL("image/jpeg", 0.9);
 }
 
 // ---------- box detection (connected components on box-background color) ----------
@@ -759,8 +807,11 @@ function renderStepMode() {
     stepCurrentItems.appendChild(makePartCard(buckets[it.bucketIdx], it.qty, it.unsure, [rec.pageNum]));
   }
 
+  // Starts at the *next* page on purpose: this page's own needs are already
+  // shown above, so "remaining" means "still needed after this step" and
+  // correctly empties out once you're on the last page of the range.
   const remaining = new Map(); // bucketIdx -> { qty, unsure, pages: Set }
-  for (let i = stepIndex; i < pageRecords.length; i++) {
+  for (let i = stepIndex + 1; i < pageRecords.length; i++) {
     for (const it of pageRecords[i].items) {
       const cur = remaining.get(it.bucketIdx) || { qty: 0, unsure: false, pages: new Set() };
       cur.qty += it.qty;
@@ -780,3 +831,47 @@ function renderStepMode() {
     stepRemainingItems.appendChild(makePartCard(buckets[idx], v.qty, v.unsure, Array.from(v.pages)));
   }
 }
+
+// ---------- LAN sharing (open on phone over Wi-Fi) ----------
+
+let qrLibPromise = null;
+function loadQrLib() {
+  if (window.qrcode) return Promise.resolve();
+  if (!qrLibPromise) {
+    qrLibPromise = new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "vendor/qrcode.js";
+      s.onload = resolve;
+      s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  return qrLibPromise;
+}
+
+function isLanAddress() {
+  const h = location.hostname;
+  return location.protocol.startsWith("http") && h !== "" && h !== "localhost" && h !== "127.0.0.1";
+}
+
+function initLanBanner() {
+  if (!isLanAddress()) return;
+  lanBanner.hidden = false;
+}
+
+async function showQr() {
+  await loadQrLib();
+  const url = location.href;
+  const qr = window.qrcode(0, "M");
+  qr.addData(url);
+  qr.make();
+  qrCanvasHolder.innerHTML = qr.createSvgTag(6, 8);
+  qrUrl.textContent = url;
+  qrOverlay.hidden = false;
+}
+
+lanQrBtn.addEventListener("click", showQr);
+qrClose.addEventListener("click", () => { qrOverlay.hidden = true; });
+qrOverlay.addEventListener("click", (e) => { if (e.target === qrOverlay) qrOverlay.hidden = true; });
+
+initLanBanner();
