@@ -9,7 +9,13 @@
 <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-<div class="app">
+<div class="shell">
+  <aside class="sidebar" id="sidebar">
+    <button type="button" class="sidebar-new-btn" id="sidebar-new-btn">+ Новая сессия</button>
+    <div class="sidebar-sessions" id="sidebar-sessions"></div>
+  </aside>
+
+  <div class="app">
   <header class="topbar">
     <h1>🧱 Список деталей по страницам</h1>
     <p class="subtitle">Загружает PDF-инструкцию и собирает список уникальных деталей (картинка + количество) для выбранного диапазона страниц.</p>
@@ -32,11 +38,6 @@
     </div>
     <button id="lan-qr-btn">Показать QR</button>
   </div>
-
-  <section class="library" id="library" hidden>
-    <h2>Ваши сессии</h2>
-    <div class="library-grid" id="library-grid"></div>
-  </section>
 
   <section class="panel" id="setup-panel">
     <div class="field">
@@ -110,6 +111,7 @@
       </div>
     </div>
   </section>
+  </div>
 </div>
 
 <div class="zoom-overlay" id="zoom-overlay" hidden>

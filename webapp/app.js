@@ -1,7 +1,7 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
-const APP_VERSION = "1.3.1";
+const APP_VERSION = "1.4.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -61,9 +61,9 @@ const qrClose = document.getElementById("qr-close");
 const updateBanner = document.getElementById("update-banner");
 const updateText = document.getElementById("update-text");
 const updateLink = document.getElementById("update-link");
-const libraryEl = document.getElementById("library");
-const libraryGrid = document.getElementById("library-grid");
-const setupLabel = document.querySelector('label[for="pdf-input"]');
+const setupPanelEl = document.getElementById("setup-panel");
+const sidebarNewBtn = document.getElementById("sidebar-new-btn");
+const sidebarSessionsEl = document.getElementById("sidebar-sessions");
 
 let pdfDoc = null;
 
@@ -72,8 +72,9 @@ let pdfDoc = null;
 // the page position, sort, and which parts you've already tapped as found.
 let currentSessionId = null;
 let currentPdfName = null;
+let currentFileKey = null; // fingerprint (name+size) the PDF blob is stored under - shared across sessions of the same file
 let currentPdfBytesForSession = null;
-let currentPdfFilePersisted = false; // whether currentSessionId's PDF blob is already saved in IndexedDB
+let currentPdfFilePersisted = false; // whether currentFileKey's PDF blob is already saved in IndexedDB
 let sessionCreatedAt = null;
 let sessionNameOverride = null;
 let pendingResumeCollected = null;
@@ -163,6 +164,7 @@ async function onPdfSelected(e) {
   }
   currentPdfFilePersisted = false;
   currentPdfName = file.name;
+  currentFileKey = fileKeyFor(file.name, file.size);
 
   const buf = await file.arrayBuffer();
   if (syncAvailable) pushSyncedPdf(file, buf.slice(0)); // fire-and-forget; pdfjs may transfer buf below
@@ -230,18 +232,30 @@ async function runAnalysis() {
   state.pagesWithParts = pagesWithParts;
   state.stepIndex = 0;
   viewControls.hidden = false;
+  setupPanelEl.hidden = true;
 
   if (!currentSessionId) {
     currentSessionId = crypto.randomUUID();
     sessionCreatedAt = Date.now();
   }
-  if (!currentPdfFilePersisted && currentPdfBytesForSession) {
-    try {
-      await putSessionFile(currentSessionId, currentPdfBytesForSession);
-      currentPdfFilePersisted = true;
-    } catch (err) {
-      console.error("Не удалось сохранить PDF сессии локально (возможно, не хватило места)", err);
-    }
+  if (!currentPdfFilePersisted && currentPdfBytesForSession && currentFileKey) {
+    // Several sessions can point at the same physical file (same name+size,
+    // e.g. re-analyzing different page ranges of one big instruction PDF) -
+    // storing it under a content fingerprint instead of the session id means
+    // only one copy of a 100+MB file ever sits in IndexedDB, however many
+    // sessions use it. Without this, every fresh analysis wrote a full new
+    // copy and storage (and each write) ballooned within a few tries.
+    //
+    // Not awaited on purpose: writing a 100+MB blob to IndexedDB can take a
+    // real amount of time, and blocking here made the UI look hung right as
+    // results were ready to show. It runs in the background instead; if the
+    // tab closes before it finishes, only local caching is lost, not the
+    // just-computed results.
+    const bytesToSave = currentPdfBytesForSession, keyToSave = currentFileKey;
+    hasSessionFile(keyToSave)
+      .then((exists) => (exists ? null : putSessionFile(keyToSave, bytesToSave)))
+      .catch((err) => console.error("Не удалось сохранить PDF сессии локально (возможно, не хватило места)", err));
+    currentPdfFilePersisted = true;
   }
 
   if (pendingResumeState) {
@@ -900,20 +914,32 @@ function colorSortKey(avgColor) {
 // "по цвету" sort). Brown/tan gets its own bucket since it's really just a
 // low-saturation, low/mid-lightness orange and would otherwise land next to
 // bright oranges despite reading as a completely different color.
-const COLOR_CATEGORY_ORDER = [
-  "Чёрный", "Серый", "Белый",
-  "Коричневый / тан", "Красный", "Оранжевый", "Жёлтый",
-  "Зелёный", "Голубой", "Синий", "Фиолетовый", "Пурпурный / розовый",
-];
 
-function colorCategory(avgColor) {
+// Classifies only the colors where a *fixed* rule genuinely makes sense -
+// black/white/gray/brown are about lightness and saturation, not hue
+// position, so there's no reason to cluster them dynamically. Everything
+// else (real hue-bearing color) returns null and is left to clusterByHue()
+// below, which groups whatever hues are actually present in this analysis
+// instead of forcing them into fixed red/orange/yellow/... windows - the
+// client's own request after "по цвету" grouping still lumped e.g. lime
+// green in with either yellow or green depending on which side of a fixed
+// boundary it happened to fall on.
+function fixedColorCategory(avgColor) {
   const [h, s, l] = rgbToHsl(avgColor);
   // Below ~15% (or above ~90%) lightness, hue/saturation are numerically
   // unstable - a few units of RGB noise swings "saturation" wildly even
   // though the color reads as unambiguous black/white to the eye (verified:
   // real near-black parts measuring RGB like [10,15,27] compute a
-  // deceptive s=0.46 from pure noise). Lightness overrides in that range.
-  if (l < 15) return "Чёрный";
+  // deceptive s=0.46 from pure noise). Lightness overrides in that range -
+  // *unless* the channel spread is too big to be noise: a genuine dark
+  // reddish-brown pin measured RGB(54,26,12) (spread 42) and was wrongly
+  // forced to black, while real near-black noise on this file topped out
+  // at a spread of ~22 (and consistently skews blue, not warm/brown) - 30
+  // sits with margin on both sides of that real-data gap.
+  if (l < 15) {
+    const spread = Math.max(...avgColor) - Math.min(...avgColor);
+    if (spread < 30) return "Чёрный";
+  }
   if (l > 90) return "Белый";
   // LEGO's signature "(dark) bluish gray" carries noticeably more saturation
   // than a neutral gray (verified on real data: s up to ~0.2, hue ~205-225)
@@ -925,7 +951,9 @@ function colorCategory(avgColor) {
     if (l < 25) return "Чёрный";
     return "Серый";
   }
-  if (h >= 18 && h < 50 && l >= 18 && l <= 62 && s < 0.65) return "Коричневый / тан";
+  // Lower bound extended down from 18 to 10 to catch the dark-reddish-brown
+  // case above once it escapes the black override (real example: l=12.8).
+  if (h >= 18 && h < 50 && l >= 10 && l <= 62 && s < 0.65) return "Коричневый / тан";
   // Plain LEGO "Tan" is a much lighter, brighter beige than the dark/medium
   // brown above (verified on real parts: RGB ~236,212,167 -> h=39.5deg,
   // s=0.6-0.7, l=79%) - well past the l<=62 cutoff, so it fell through to
@@ -933,17 +961,97 @@ function colorCategory(avgColor) {
   // True vivid orange at this hue sits at l~63-64% with s>0.8, so gating on
   // l>68 keeps it out while still catching the light-tan cluster up to white.
   if (h >= 30 && h < 46 && l > 68 && l <= 88) return "Коричневый / тан";
-  if (h < 18 || h >= 350) return "Красный";
-  // LEGO's actual "Yellow" is a warm golden shade that measures ~45-50° hue,
-  // right where a textbook orange/yellow split would put it - verified on a
-  // real yellow part (RGB ~251,212,50 -> h=48.4°) landing correctly here.
-  if (h < 40) return "Оранжевый";
-  if (h < 70) return "Жёлтый";
-  if (h < 165) return "Зелёный";
-  if (h < 200) return "Голубой";
-  if (h < 255) return "Синий";
-  if (h < 300) return "Фиолетовый";
-  return "Пурпурный / розовый";
+  return null; // chromatic - let clusterByHue() decide where it lands
+}
+
+// Reference points used only to *name* a hue cluster after the fact (and to
+// order clusters left-to-right red->...->magenta) - not fixed boundaries.
+const HUE_ANCHORS = [
+  { hue: 0, name: "Красный", prefix: "красно" },
+  { hue: 25, name: "Оранжевый", prefix: "оранжево" },
+  { hue: 55, name: "Жёлтый", prefix: "жёлто" },
+  { hue: 130, name: "Зелёный", prefix: "зелено" },
+  { hue: 190, name: "Голубой", prefix: "голубо" },
+  { hue: 220, name: "Синий", prefix: "сине" },
+  { hue: 275, name: "Фиолетовый", prefix: "фиолетово" },
+  { hue: 320, name: "Пурпурный / розовый", prefix: "пурпурно" },
+];
+
+function hueDist(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return Math.min(d, 360 - d);
+}
+
+// Names a cluster by its centroid hue: close enough to one named anchor ->
+// use that name outright; sitting clearly between two -> a compound name
+// ("Жёлто-зелёный" etc.), which is how a person would actually describe a
+// lime-green part anyway.
+function nameForHue(h) {
+  const withDist = HUE_ANCHORS.map((a) => ({ ...a, d: hueDist(a.hue, h) })).sort((a, b) => a.d - b.d);
+  const nearest = withDist[0], second = withDist[1];
+  if (nearest.d <= 18) return nearest.name;
+  let [lo, hi] = [nearest, second].sort((a, b) => a.hue - b.hue);
+  if (lo.name === "Красный" && hi.name === "Пурпурный / розовый") { [lo, hi] = [hi, lo]; }
+  return `${lo.prefix[0].toUpperCase()}${lo.prefix.slice(1)}-${hi.name.toLowerCase()}`;
+}
+
+const MIN_HUE_GAP = 22; // degrees of empty hue-space that triggers a cluster split
+const MIN_CLUSTER_SIZE = 2; // distinct parts below this get folded into their nearest neighbor
+
+// Groups chromatic items { hue, weight } by where the hues actually cluster
+// in *this* analysis, rather than fixed windows. Returns [[name, items[], centroidHue], ...].
+function clusterByHue(items) {
+  if (!items.length) return [];
+  const sorted = items.slice().sort((a, b) => a.hue - b.hue);
+  const n = sorted.length;
+
+  // Cut the hue circle at its single largest empty stretch so a run of reds
+  // spanning the 350deg-10deg seam doesn't get spuriously split in two.
+  let cutIdx = 0, maxGap = -1;
+  for (let i = 0; i < n; i++) {
+    const cur = sorted[i].hue;
+    const next = sorted[(i + 1) % n].hue;
+    const gap = i === n - 1 ? 360 - cur + next : next - cur;
+    if (gap > maxGap) { maxGap = gap; cutIdx = (i + 1) % n; }
+  }
+  const linear = sorted.slice(cutIdx).concat(sorted.slice(0, cutIdx));
+  let prevHue = null, offset = 0;
+  const unrolled = linear.map((it) => {
+    let uh = it.hue + offset;
+    if (prevHue !== null && uh < prevHue) { offset += 360; uh += 360; }
+    prevHue = uh;
+    return { ...it, uh };
+  });
+
+  const clusters = [[unrolled[0]]];
+  for (let i = 1; i < unrolled.length; i++) {
+    if (unrolled[i].uh - unrolled[i - 1].uh >= MIN_HUE_GAP) clusters.push([]);
+    clusters[clusters.length - 1].push(unrolled[i]);
+  }
+
+  const centroidOf = (c) => {
+    const totalWeight = c.reduce((s, it) => s + it.weight, 0);
+    return (((c.reduce((s, it) => s + it.uh * it.weight, 0) / totalWeight) % 360) + 360) % 360;
+  };
+  let named = clusters.map((c) => ({ items: c, centroid: centroidOf(c), name: nameForHue(centroidOf(c)) }));
+
+  // Fold away small clusters that only exist *between* two named colors -
+  // that's the new thing dynamic clustering enables (a lime-green splinter
+  // between yellow and green), so it's the only kind worth a minimum size
+  // before it earns a heading. A cluster that lands close to an established
+  // color (Red, Blue, ...) keeps its heading however few items it has -
+  // same as the old fixed categories always did.
+  for (let i = named.length - 1; i >= 0 && named.length > 1; i--) {
+    if (!named[i].name.includes("-") || named[i].items.length >= MIN_CLUSTER_SIZE) continue;
+    const distPrev = i > 0 ? named[i].items[0].uh - named[i - 1].items[named[i - 1].items.length - 1].uh : Infinity;
+    const distNext = i < named.length - 1 ? named[i + 1].items[0].uh - named[i].items[named[i].items.length - 1].uh : Infinity;
+    const target = distPrev <= distNext ? i - 1 : i + 1;
+    const merged = named[target].items.concat(named[i].items).sort((a, b) => a.uh - b.uh);
+    named[target] = { items: merged, centroid: centroidOf(merged), name: nameForHue(centroidOf(merged)) };
+    named.splice(i, 1);
+  }
+
+  return named.map((g) => [g.name, g.items, g.centroid]);
 }
 
 function sortEntries(entries, mode, getBucket, getCount, getFirstPage) {
@@ -965,23 +1073,41 @@ function sortEntries(entries, mode, getBucket, getCount, getFirstPage) {
   return arr;
 }
 
-// Groups entries into named color families (fixed display order), sorting
-// each family's contents by count descending. Returns [[category, entries[]], ...]
+const ACHROMATIC_ORDER = ["Чёрный", "Серый", "Белый", "Коричневый / тан"];
+
+// Groups entries into color families: black/white/gray/brown use the fixed
+// lightness-based rule (display order fixed too), everything else clusters
+// dynamically by whatever hues are actually present in this analysis, sorted
+// red->...->magenta by centroid. Returns [[name, entries[]], ...].
 function groupByColor(entries, getBucket, getCount) {
-  const groups = new Map();
+  const fixedGroups = new Map();
+  const chromatic = [];
   for (const e of entries) {
-    const cat = colorCategory(getBucket(e).avgColor);
-    if (!groups.has(cat)) groups.set(cat, []);
-    groups.get(cat).push(e);
+    const avgColor = getBucket(e).avgColor;
+    const fixed = fixedColorCategory(avgColor);
+    if (fixed) {
+      if (!fixedGroups.has(fixed)) fixedGroups.set(fixed, []);
+      fixedGroups.get(fixed).push(e);
+    } else {
+      const [h] = rgbToHsl(avgColor);
+      chromatic.push({ e, hue: h, weight: getCount(e) });
+    }
   }
-  for (const arr of groups.values()) arr.sort((a, b) => getCount(b) - getCount(a));
+
   const ordered = [];
-  for (const cat of COLOR_CATEGORY_ORDER) {
-    if (groups.has(cat)) ordered.push([cat, groups.get(cat)]);
+  for (const cat of ACHROMATIC_ORDER) {
+    if (fixedGroups.has(cat)) ordered.push([cat, fixedGroups.get(cat)]);
   }
-  for (const [cat, arr] of groups) {
-    if (!COLOR_CATEGORY_ORDER.includes(cat)) ordered.push([cat, arr]);
+
+  const clusters = clusterByHue(chromatic).sort((a, b) => a[2] - b[2]);
+  const byName = new Map(); // merge same-named clusters, in the rare case two land on one name
+  for (const [name, items] of clusters) {
+    if (!byName.has(name)) byName.set(name, []);
+    byName.get(name).push(...items.map((it) => it.e));
   }
+  for (const [name, arr] of byName) ordered.push([name, arr]);
+
+  for (const [, arr] of ordered) arr.sort((a, b) => getCount(b) - getCount(a));
   return ordered;
 }
 
@@ -1197,15 +1323,29 @@ async function putSessionMeta(meta) {
   await reqToPromise(store.put(meta));
 }
 
-async function putSessionFile(id, buf) {
-  const store = await dbStore(STORE_FILES, "readwrite");
-  await reqToPromise(store.put({ id, buf }));
+function fileKeyFor(name, size) {
+  return `${name}::${size}`;
 }
 
-async function getSessionFile(id) {
+async function putSessionFile(key, buf) {
+  const store = await dbStore(STORE_FILES, "readwrite");
+  await reqToPromise(store.put({ id: key, buf }));
+}
+
+async function hasSessionFile(key) {
   try {
     const store = await dbStore(STORE_FILES, "readonly");
-    const rec = await reqToPromise(store.get(id));
+    const count = await reqToPromise(store.count(key));
+    return count > 0;
+  } catch (err) {
+    return false;
+  }
+}
+
+async function getSessionFile(key) {
+  try {
+    const store = await dbStore(STORE_FILES, "readonly");
+    const rec = await reqToPromise(store.get(key));
     return rec ? rec.buf : null;
   } catch (err) {
     console.error("Не удалось прочитать сохранённый PDF сессии", err);
@@ -1214,10 +1354,20 @@ async function getSessionFile(id) {
 }
 
 async function deleteSession(id) {
+  const sessions = await getAllSessions();
+  const target = sessions.find((s) => s.id === id);
   const sessStore = await dbStore(STORE_SESSIONS, "readwrite");
   await reqToPromise(sessStore.delete(id));
-  const fileStore = await dbStore(STORE_FILES, "readwrite");
-  await reqToPromise(fileStore.delete(id));
+  if (target) {
+    // legacy sessions (saved before file-dedup) stored their blob under the
+    // session id itself, not a fileKey - fileKey ?? id covers both.
+    const key = target.fileKey || target.id;
+    const stillUsed = sessions.some((s) => s.id !== id && (s.fileKey || s.id) === key);
+    if (!stillUsed) {
+      const fileStore = await dbStore(STORE_FILES, "readwrite");
+      await reqToPromise(fileStore.delete(key));
+    }
+  }
 }
 
 function defaultSessionName() {
@@ -1229,6 +1379,7 @@ async function saveSessionMeta() {
   if (!currentSessionId) return;
   const meta = {
     id: currentSessionId,
+    fileKey: currentFileKey,
     name: sessionNameOverride || defaultSessionName(),
     pdfName: currentPdfName,
     createdAt: sessionCreatedAt || Date.now(),
@@ -1273,36 +1424,65 @@ function timeAgo(ts) {
 
 function renderLibrary() {
   getAllSessions().then((sessions) => {
-    libraryEl.hidden = sessions.length === 0;
-    libraryGrid.innerHTML = "";
-    for (const meta of sessions) libraryGrid.appendChild(makeSessionCard(meta));
+    sidebarSessionsEl.innerHTML = "";
+    if (!sessions.length) {
+      const empty = document.createElement("div");
+      empty.className = "sidebar-empty";
+      empty.textContent = "Пока нет сессий — загрузите PDF, чтобы начать.";
+      sidebarSessionsEl.appendChild(empty);
+      return;
+    }
+    for (const meta of sessions) sidebarSessionsEl.appendChild(makeSessionRow(meta));
   });
 }
 
-function makeSessionCard(meta) {
-  const card = document.createElement("div");
-  card.className = "session-card";
+function makeSessionRow(meta) {
+  const row = document.createElement("div");
+  row.className = "session-row" + (meta.id === currentSessionId ? " active" : "");
+  row.setAttribute("role", "button");
+  row.setAttribute("tabindex", "0");
+  row.setAttribute("aria-current", meta.id === currentSessionId ? "true" : "false");
 
   const totalSteps = meta.totalSteps || 0;
   const pageProgress = totalSteps > 0 ? Math.round(((meta.stepIndex + 1) / totalSteps) * 100) : 0;
   const totalParts = meta.totalParts || 0;
   const collectedCount = (meta.collected || []).length;
 
-  card.innerHTML = `
-    <div class="session-name" contenteditable="true" spellcheck="false"></div>
-    <div class="session-meta">${escapeHtml(meta.pdfName || "")} · стр. ${meta.from}–${meta.to} · ${timeAgo(meta.updatedAt)}</div>
-    <div class="session-progress-bar"><div class="session-progress-fill" style="width:${pageProgress}%"></div></div>
-    <div class="session-progress-label">${pageProgress}% прочитано · собрано ${collectedCount}/${totalParts}</div>
-    <button type="button" class="session-delete" title="Удалить сессию" aria-label="Удалить сессию">✕</button>
+  row.innerHTML = `
+    <div class="session-row-name" contenteditable="false" spellcheck="false" title="Двойной клик, чтобы переименовать"></div>
+    <div class="session-row-meta">
+      <div class="session-row-progress-bar"><div class="session-row-progress-fill" style="width:${pageProgress}%"></div></div>
+      <span>${collectedCount}/${totalParts}</span>
+    </div>
+    <button type="button" class="session-row-delete" title="Удалить сессию" aria-label="Удалить сессию">✕</button>
   `;
+  row.title = `${meta.pdfName || ""} · стр. ${meta.from}–${meta.to} · ${timeAgo(meta.updatedAt)}`;
 
-  const nameEl = card.querySelector(".session-name");
+  // The name fills most of the row, so a single click on it has to still
+  // navigate (like clicking anywhere else on the row) - only a deliberate
+  // double-click opens it up for renaming. A plain click-to-edit here made
+  // most clicks on a session silently do nothing instead of switching to it.
+  const nameEl = row.querySelector(".session-row-name");
   nameEl.textContent = meta.name;
-  nameEl.addEventListener("click", (e) => e.stopPropagation());
+  nameEl.addEventListener("dblclick", (e) => {
+    e.stopPropagation();
+    nameEl.contentEditable = "true";
+    nameEl.focus();
+    const range = document.createRange();
+    range.selectNodeContents(nameEl);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  });
+  nameEl.addEventListener("click", (e) => {
+    if (nameEl.contentEditable === "true") e.stopPropagation();
+  });
   nameEl.addEventListener("keydown", (e) => {
     if (e.key === "Enter") { e.preventDefault(); nameEl.blur(); }
+    if (e.key === "Escape") { e.preventDefault(); nameEl.textContent = meta.name; nameEl.blur(); }
   });
   nameEl.addEventListener("blur", async () => {
+    nameEl.contentEditable = "false";
     const fallback = `${(meta.pdfName || "PDF").replace(/\.pdf$/i, "")}, стр. ${meta.from}–${meta.to}`;
     const newName = nameEl.textContent.trim() || fallback;
     nameEl.textContent = newName;
@@ -1314,32 +1494,91 @@ function makeSessionCard(meta) {
     }
   });
 
-  card.querySelector(".session-delete").addEventListener("click", async (e) => {
+  row.querySelector(".session-row-delete").addEventListener("click", async (e) => {
     e.stopPropagation();
     if (!confirm(`Удалить сессию «${meta.name}»?`)) return;
+    const wasCurrent = currentSessionId === meta.id;
     await deleteSession(meta.id);
-    if (currentSessionId === meta.id) currentSessionId = null;
-    renderLibrary();
+    if (wasCurrent) startNewSession();
+    else renderLibrary();
   });
 
-  card.addEventListener("click", () => resumeSession(meta.id));
+  row.addEventListener("click", () => {
+    if (meta.id !== currentSessionId) resumeSession(meta.id);
+  });
+  row.addEventListener("keydown", (e) => {
+    if ((e.key === "Enter" || e.key === " ") && document.activeElement === row) {
+      e.preventDefault();
+      if (meta.id !== currentSessionId) resumeSession(meta.id);
+    }
+  });
 
-  return card;
+  return row;
 }
+
+// Resets to a blank setup screen, same as a fresh page load - used by the
+// sidebar's "+ Новая сессия" button and after deleting the active session.
+function startNewSession() {
+  currentSessionId = null;
+  currentPdfName = null;
+  currentFileKey = null;
+  currentPdfBytesForSession = null;
+  currentPdfFilePersisted = false;
+  sessionCreatedAt = null;
+  sessionNameOverride = null;
+  pendingResumeCollected = null;
+  pendingResumeState = null;
+  resumeAfterReselect = false;
+  pdfDoc = null;
+
+  pdfInput.value = "";
+  fileInfo.textContent = "";
+  rangeFields.hidden = true;
+  actionField.hidden = true;
+  progressWrap.hidden = true;
+
+  state.buckets = [];
+  state.pageRecords = [];
+  state.collected.clear();
+  summaryEl.hidden = true;
+  viewControls.hidden = true;
+  resultsEl.innerHTML = "";
+  resultsEl.hidden = true;
+  stepModeEl.hidden = true;
+
+  setupPanelEl.hidden = false;
+  renderLibrary();
+}
+
+sidebarNewBtn.addEventListener("click", startNewSession);
 
 async function resumeSession(id) {
   const sessions = await getAllSessions();
   const meta = sessions.find((s) => s.id === id);
   if (!meta) return;
 
+  // clear whatever the previously-open session left on screen before
+  // switching, so nothing stale is visible while the new one loads
+  state.buckets = [];
+  state.pageRecords = [];
+  state.collected.clear();
+  summaryEl.hidden = true;
+  viewControls.hidden = true;
+  resultsEl.innerHTML = "";
+  resultsEl.hidden = true;
+  stepModeEl.hidden = true;
+  setupPanelEl.hidden = false;
+
   currentSessionId = meta.id;
   currentPdfName = meta.pdfName;
+  currentFileKey = meta.fileKey || meta.id; // legacy sessions stored the blob under the session id itself
   sessionCreatedAt = meta.createdAt;
   sessionNameOverride = meta.name;
   pendingResumeState = { sortMode: meta.sortMode, mode: meta.mode, stepIndex: meta.stepIndex };
   pendingResumeCollected = meta.collected || [];
+  renderLibrary(); // reflect the new active row right away, don't wait for analysis to finish
 
-  const bytes = await getSessionFile(id);
+  const bytes = await getSessionFile(currentFileKey);
   if (!bytes) {
     // the PDF blob got evicted (storage cleared / quota pressure) - keep the
     // session id and pending resume state, but ask the user to re-pick the

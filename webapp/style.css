@@ -57,7 +57,16 @@ body {
   overflow-x: hidden;
 }
 
+.shell {
+  display: flex;
+  align-items: flex-start;
+  min-height: 100vh;
+  min-height: 100dvh;
+}
+
 .app {
+  flex: 1 1 auto;
+  min-width: 0;
   max-width: 980px;
   margin: 0 auto;
   padding: 20px 16px 60px;
@@ -672,97 +681,152 @@ input[type="range"] {
   to { background-position: 0 0; }
 }
 
-/* ---------- session library ---------- */
+/* ---------- session sidebar ---------- */
 
-.library {
-  margin-bottom: 18px;
-  animation: fadeInUp 0.3s ease;
-}
-
-.library h2 {
-  font-size: 1rem;
-  margin: 0 0 10px;
-  color: var(--text-dim);
-}
-
-.library-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.session-card {
+.sidebar {
+  flex: 0 0 260px;
+  width: 260px;
   background: var(--panel);
-  border: 1px solid var(--border);
+  border-right: 1px solid var(--border);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  height: 100dvh;
+  overflow-y: auto;
+}
+
+.sidebar-new-btn {
+  width: 100%;
+  padding: 10px 12px;
   border-radius: var(--radius);
-  padding: 14px;
-  cursor: pointer;
-  transition: transform var(--transition-fast) ease, box-shadow var(--transition-fast) ease, border-color var(--transition-fast) ease;
-  position: relative;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-weight: 600;
+  font-size: 0.88rem;
+  transition: border-color var(--transition-fast) ease, background var(--transition-fast) ease;
 }
 
-.session-card:hover {
-  transform: translateY(-2px);
+.sidebar-new-btn:hover {
   border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
-  box-shadow: 0 10px 20px -12px rgba(0, 0, 0, 0.45);
+  background: color-mix(in srgb, var(--accent) 10%, var(--panel-2));
 }
 
-.session-name {
-  font-weight: 700;
-  font-size: 0.95rem;
+.sidebar-sessions {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  overflow-y: auto;
+}
+
+.sidebar-empty {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  padding: 8px 6px;
+  line-height: 1.4;
+}
+
+.session-row {
+  position: relative;
+  padding: 7px 30px 7px 10px;
+  border-radius: 10px;
+  cursor: pointer;
+  transition: background var(--transition-fast) ease;
+}
+
+.session-row:hover {
+  background: var(--panel-2);
+}
+
+.session-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.session-row.active {
+  background: color-mix(in srgb, var(--accent) 16%, var(--panel-2));
+}
+
+.session-row-name {
+  font-weight: 600;
+  font-size: 0.85rem;
   border: none;
   background: transparent;
   color: var(--text);
   width: 100%;
-  padding: 2px 0;
-  margin-bottom: 4px;
+  padding: 1px 0;
   font-family: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
-.session-name:focus {
+.session-row-name:focus {
   outline: none;
   border-bottom: 1px solid var(--accent);
+  white-space: normal;
 }
 
-.session-meta {
-  font-size: 0.78rem;
+.session-row-meta {
+  font-size: 0.7rem;
   color: var(--text-dim);
-  margin-bottom: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 3px;
 }
 
-.session-progress-bar {
-  height: 6px;
-  background: var(--panel-2);
+.session-row-progress-bar {
+  flex: 1;
+  height: 4px;
+  background: var(--border);
   border-radius: 999px;
   overflow: hidden;
-  margin-bottom: 6px;
 }
 
-.session-progress-fill {
+.session-row-progress-fill {
   height: 100%;
   background: linear-gradient(90deg, var(--accent), var(--good));
 }
 
-.session-progress-label {
-  font-size: 0.72rem;
-  color: var(--text-dim);
-}
-
-.session-delete {
+.session-row-delete {
   position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 26px;
-  height: 26px;
+  top: 6px;
+  right: 4px;
+  width: 22px;
+  height: 22px;
   padding: 0;
   border-radius: 999px;
   background: transparent;
   color: var(--text-dim);
-  font-size: 0.9rem;
+  font-size: 0.8rem;
   line-height: 1;
+  opacity: 0;
+  transition: opacity var(--transition-fast) ease, background var(--transition-fast) ease;
 }
 
-.session-delete:hover {
+.session-row:hover .session-row-delete,
+.session-row:focus-within .session-row-delete {
+  opacity: 1;
+}
+
+.session-row-delete:hover {
   background: color-mix(in srgb, red 20%, transparent);
   color: #ff6b6b;
+}
+
+@media (max-width: 720px) {
+  .shell { flex-direction: column; }
+  .sidebar {
+    position: static;
+    width: 100%;
+    height: auto;
+    max-height: 240px;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
 }

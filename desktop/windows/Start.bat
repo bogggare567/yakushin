@@ -4,6 +4,16 @@ set DIR=%~dp0..\..
 cd /d "%DIR%"
 
 set PORT=8934
+
+REM Auto-update: silently pull the latest version if this is an unmodified,
+REM fast-forwardable git checkout - never touches local edits.
+where git >nul 2>nul
+if %errorlevel%==0 (
+    if exist "%DIR%\.git" (
+        git diff --quiet 2>nul && git diff --cached --quiet 2>nul && git pull --ff-only --quiet >nul 2>nul
+    )
+)
+
 set IP=
 for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do (
     set IP=%%a
@@ -14,6 +24,14 @@ if "%IP%"=="" (
     echo Wi-Fi не найден - открываю локально ^(без доступа с телефона^).
     start "" "%DIR%\webapp\index.html"
     pause
+    exit /b 0
+)
+
+REM Reuse an already-running server on this port instead of erroring out.
+curl -s -o NUL -m 1 "http://127.0.0.1:%PORT%/"
+if %errorlevel%==0 (
+    echo Сервер уже запущен на порту %PORT% - открываю страницу.
+    start "" "http://%IP%:%PORT%/"
     exit /b 0
 )
 
@@ -38,7 +56,8 @@ start "" "http://%IP%:%PORT%/"
 python "%DIR%\tools\lan_server.py" %PORT% "%DIR%\webapp"
 if errorlevel 1 (
     echo.
-    echo Похоже, Python не найден или сервер не запустился. Полный вывод ipconfig:
-    ipconfig
+    echo Похоже, Python не найден, порт %PORT% уже занят, или сервер не запустился.
+    echo Открываю страницу локально вместо этого.
+    start "" "%DIR%\webapp\index.html"
 )
 pause
