@@ -1,6 +1,7 @@
 @echo off
 setlocal enabledelayedexpansion
-cd /d "%~dp0..\..\webapp" || (echo Не найдена папка webapp & pause & exit /b 1)
+set DIR=%~dp0..\..
+cd /d "%DIR%" || (echo Не найдена папка проекта & pause & exit /b 1)
 
 set PORT=8934
 set IP=
@@ -25,7 +26,8 @@ echo.
 echo   http://%IP%:%PORT%/
 echo.
 echo   На самом сайте есть кнопка "Показать QR" - можно просто
-echo   отсканировать камерой телефона.
+echo   отсканировать камерой телефона. Оба устройства также смогут
+echo   делиться страницей и файлом инструкции между собой.
 echo.
 echo   Если не открывается - проверьте, что это действительно IP вашего
 echo   Wi-Fi адаптера (см. полный вывод ipconfig выше), и что брандмауэр
@@ -36,5 +38,5 @@ echo ==================================================================
 echo.
 
 start "" "http://%IP%:%PORT%/"
-python -m http.server %PORT% --bind 0.0.0.0
+python "%DIR%\tools\lan_server.py" %PORT% "%DIR%\webapp"
 pause

@@ -4,7 +4,7 @@
     {
       "name": "webapp",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "http.server", "8934", "--directory", "webapp"],
+      "runtimeArgs": ["tools/lan_server.py", "8934", "webapp"],
       "port": 8934
     }
   ]

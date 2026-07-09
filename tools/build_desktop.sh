@@ -11,7 +11,7 @@ WIN_DEST="desktop/windows/webapp"
 
 for dest in "$MAC_DEST" "$WIN_DEST"; do
   mkdir -p "$dest/vendor"
-  cp "$SRC"/index.html "$SRC"/style.css "$SRC"/app.js "$SRC"/glyph-templates.js "$dest"/
+  cp "$SRC"/index.html "$SRC"/style.css "$SRC"/app.js "$SRC"/glyph-templates.js "$SRC"/version.json "$dest"/
   cp "$SRC"/vendor/qrcode.js "$dest"/vendor/
 done
 

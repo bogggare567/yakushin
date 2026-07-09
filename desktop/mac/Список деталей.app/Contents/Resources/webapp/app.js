@@ -1,6 +1,9 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
+const APP_VERSION = "1.2.0";
+const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
+
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
 const BOX_BG = [215, 238, 254]; // the light-blue "new parts" callout background color
 const BOX_COLOR_TOL = 14; // tolerance for matching the box background color
@@ -10,12 +13,12 @@ const SIZE_K = RENDER_SCALE / SCALE_REF;
 const MIN_BOX_W = 40 * SIZE_K, MIN_BOX_H = 40 * SIZE_K, MIN_BOX_AREA = 400 * SIZE_K * SIZE_K;
 const MIN_COL_GAP = 6 * SIZE_K; // px of background between two item slots
 const MIN_ROW_GAP = 2 * SIZE_K; // px of background rows between icon and qty text
+const MIN_GLYPH_W = 5 * SIZE_K, MIN_GLYPH_H = 8 * SIZE_K; // below this a "glyph" is noise, not a digit
 const SIG_SIZE = 14; // color-grid signature size (px) used to identify/dedup a part's icon
 const SIG_MARGIN = 2; // border reserved inside SIG_SIZE so small shifts stay in-bounds
 const SIG_MAX_SHIFT = 2; // px of shift tried in each direction when comparing two signatures
 const SIG_DIST_TOL = 40; // max mean color difference (0-255 scale) to call two icons the same part
 const COLOR_TOL = 24;
-const GLYPH_MIN_GAP = 1; // px of background columns between two digit glyphs
 const GLYPH_MAX_DIST_FRAC = 0.22; // fraction of bits mismatched above which a glyph match is untrusted
 
 const pdfInput = document.getElementById("pdf-input");
@@ -49,13 +52,28 @@ const zoomImg = document.getElementById("zoom-img");
 const zoomSpinner = document.getElementById("zoom-spinner");
 const zoomClose = document.getElementById("zoom-close");
 const lanBanner = document.getElementById("lan-banner");
+const lanBannerSubtitle = document.getElementById("lan-banner-subtitle");
 const lanQrBtn = document.getElementById("lan-qr-btn");
 const qrOverlay = document.getElementById("qr-overlay");
 const qrCanvasHolder = document.getElementById("qr-canvas-holder");
 const qrUrl = document.getElementById("qr-url");
 const qrClose = document.getElementById("qr-close");
+const updateBanner = document.getElementById("update-banner");
+const updateText = document.getElementById("update-text");
+const updateLink = document.getElementById("update-link");
 
 let pdfDoc = null;
+
+// LAN sync (see tools/lan_server.py): lets a second device on the same
+// Wi-Fi act as a remote control (step navigation, sort, mode) and/or as the
+// source (hand over the PDF + page range). Plain static hosting (GitHub
+// Pages, file://, vanilla `python -m http.server`) has no such API, so this
+// stays fully inert there - detectSync() below just fails quietly.
+let syncAvailable = false;
+let suppressSyncPush = false;
+let lastSyncedStateVersion = -1;
+let lastLoadedPdfVersion = -1;
+let lastAnalyzedKey = "";
 
 const state = {
   buckets: [],
@@ -75,6 +93,7 @@ modeStepBtn.addEventListener("click", () => setMode("step"));
 sortSelect.addEventListener("change", () => {
   state.sortMode = sortSelect.value;
   render();
+  pushSyncState();
 });
 stepPrevBtn.addEventListener("click", () => goToStep(state.stepIndex - 1));
 stepNextBtn.addEventListener("click", () => goToStep(state.stepIndex + 1));
@@ -113,6 +132,7 @@ async function onPdfSelected(e) {
   summaryEl.hidden = true;
 
   const buf = await file.arrayBuffer();
+  if (syncAvailable) pushSyncedPdf(file, buf.slice(0)); // fire-and-forget; pdfjs may transfer buf below
   pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
 
   fileInfo.textContent = `${file.name} — ${pdfDoc.numPages} стр.`;
@@ -132,6 +152,7 @@ async function runAnalysis() {
 
   analyzeBtn.disabled = true;
   progressWrap.hidden = false;
+  progressFill.classList.add("is-active");
   resultsEl.innerHTML = "";
   summaryEl.hidden = true;
   viewControls.hidden = true;
@@ -163,6 +184,7 @@ async function runAnalysis() {
   }
 
   setProgress(1, "Готово");
+  progressFill.classList.remove("is-active");
   state.buckets = buckets;
   state.pageRecords = pageRecords;
   state.from = from;
@@ -170,7 +192,7 @@ async function runAnalysis() {
   state.pagesWithParts = pagesWithParts;
   state.stepIndex = 0;
   viewControls.hidden = false;
-  setMode("list");
+  setMode("list"); // also broadcasts the fresh range/mode to any synced devices
   analyzeBtn.disabled = false;
 }
 
@@ -476,24 +498,22 @@ function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
   }
   const fg = binaryOpen2x2(diffMask(local, w, h, FG_DIFF_THRESHOLD), w, h);
 
-  const colHasFg = new Array(w).fill(false);
-  for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) { if (fg[y * w + x]) { colHasFg[x] = true; break; } }
-  }
-  const runs = findRuns(colHasFg, GLYPH_MIN_GAP);
-  if (!runs.length) return { qty: null, unsure: true };
+  // Segment by actual connected components, not column projection: a stray
+  // speck (JPEG noise, or a sliver of the icon bleeding into a fallback-
+  // placed text crop) can sit in the same column range as a real glyph
+  // without touching it. Column projection would fuse it into that glyph's
+  // bounding box and distort the shape; components keep it separate so the
+  // size filter below can drop it cleanly.
+  const components = findGlyphComponents(fg, w, h)
+    .filter((c) => (c.maxX - c.minX + 1) >= MIN_GLYPH_W && (c.maxY - c.minY + 1) >= MIN_GLYPH_H)
+    .sort((a, b) => a.minX - b.minX);
+  if (!components.length) return { qty: null, unsure: true };
 
   let label = "";
   let anyUnsure = false;
-  for (const [gs, ge] of runs) {
-    let r0 = -1, r1 = -1;
-    for (let y = 0; y < h; y++) {
-      let any = false;
-      for (let x = gs; x < ge; x++) { if (fg[y * w + x]) { any = true; break; } }
-      if (any) { if (r0 === -1) r0 = y; r1 = y; }
-    }
-    if (r0 === -1) continue;
-    const normalized = resizeGlyph(fg, w, gs, ge, r0, r1);
+  for (const comp of components) {
+    const { mask, cw, ch } = componentLocalMask(comp, w);
+    const normalized = resizeGlyphMask(mask, cw, ch);
     const { bestLabel, bestDist } = classifyGlyph(normalized);
     if (bestDist > GLYPH_MAX_DIST) { anyUnsure = true; continue; }
     label += bestLabel;
@@ -505,8 +525,54 @@ function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
   return { qty: parseInt(digits, 10), unsure: anyUnsure };
 }
 
-function resizeGlyph(fg, fgW, x0, x1, y0, y1) {
-  const srcW = x1 - x0, srcH = y1 - y0 + 1;
+// 8-connected flood fill so a diagonally-touching antialiased stroke still
+// counts as one component; each result carries its own tight bbox + pixels.
+function findGlyphComponents(fg, w, h) {
+  const visited = new Uint8Array(w * h);
+  const components = [];
+  const stack = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const start = y * w + x;
+      if (!fg[start] || visited[start]) continue;
+      let minX = x, maxX = x, minY = y, maxY = y;
+      const pixels = [];
+      stack.length = 0; stack.push(start); visited[start] = 1;
+      while (stack.length) {
+        const cur = stack.pop();
+        const cx = cur % w, cy = (cur / w) | 0;
+        pixels.push(cur);
+        if (cx < minX) minX = cx; if (cx > maxX) maxX = cx;
+        if (cy < minY) minY = cy; if (cy > maxY) maxY = cy;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            if (!dx && !dy) continue;
+            const nx = cx + dx, ny = cy + dy;
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+            const n = ny * w + nx;
+            if (fg[n] && !visited[n]) { visited[n] = 1; stack.push(n); }
+          }
+        }
+      }
+      components.push({ minX, maxX, minY, maxY, pixels });
+    }
+  }
+  return components;
+}
+
+// Builds a dense mask containing only this component's own pixels, sized to
+// its tight bbox - so a nearby unrelated blob can never leak into its shape.
+function componentLocalMask(comp, fgW) {
+  const cw = comp.maxX - comp.minX + 1, ch = comp.maxY - comp.minY + 1;
+  const mask = new Uint8Array(cw * ch);
+  for (const idx of comp.pixels) {
+    const x = idx % fgW, y = (idx / fgW) | 0;
+    mask[(y - comp.minY) * cw + (x - comp.minX)] = 1;
+  }
+  return { mask, cw, ch };
+}
+
+function resizeGlyphMask(mask, srcW, srcH) {
   const pad = 2;
   const scale = Math.min((GLYPH_W - 2 * pad) / srcW, (GLYPH_H - 2 * pad) / srcH);
   const nw = Math.max(1, Math.round(srcW * scale));
@@ -517,7 +583,7 @@ function resizeGlyph(fg, fgW, x0, x1, y0, y1) {
     const sy = Math.min(srcH - 1, Math.floor(y / scale));
     for (let x = 0; x < nw; x++) {
       const sx = Math.min(srcW - 1, Math.floor(x / scale));
-      out[(oy + y) * GLYPH_W + (ox + x)] = fg[(y0 + sy) * fgW + (x0 + sx)];
+      out[(oy + y) * GLYPH_W + (ox + x)] = mask[sy * srcW + sx];
     }
   }
   return out;
@@ -568,16 +634,29 @@ function autocropCanvas(canvas) {
 // (box layout shifts slightly depending on how many sibling items share it), so plain
 // pixel/gradient hashing sees "different" parts. Comparing small color grids across a
 // handful of shift offsets and keeping the best alignment makes matching shift-tolerant.
+// The 3D icon render shades each part with a near-black outline and often a
+// bright specular highlight along raised edges - neither is the part's actual
+// color. Small parts especially are mostly outline by area, so a plain mean
+// over every foreground pixel skews dark/washed-out and confuses color sort
+// and dedup. Average only the mid-lightness ("base plastic") pixels instead,
+// falling back to the plain mean for genuinely near-black/white parts.
 function computeSignature(canvas) {
   const cw = canvas.width, ch = canvas.height;
   const octx = canvas.getContext("2d");
   const odata = octx.getImageData(0, 0, cw, ch).data;
   let rSum = 0, gSum = 0, bSum = 0, cnt = 0;
+  let rSumMid = 0, gSumMid = 0, bSumMid = 0, cntMid = 0;
   for (let i = 0; i < odata.length; i += 4) {
-    const dr = Math.abs(odata[i] - BOX_BG[0]), dg = Math.abs(odata[i + 1] - BOX_BG[1]), db = Math.abs(odata[i + 2] - BOX_BG[2]);
-    if (Math.max(dr, dg, db) > FG_DIFF_THRESHOLD) { rSum += odata[i]; gSum += odata[i + 1]; bSum += odata[i + 2]; cnt++; }
+    const r = odata[i], g = odata[i + 1], b = odata[i + 2];
+    const dr = Math.abs(r - BOX_BG[0]), dg = Math.abs(g - BOX_BG[1]), db = Math.abs(b - BOX_BG[2]);
+    if (Math.max(dr, dg, db) <= FG_DIFF_THRESHOLD) continue;
+    rSum += r; gSum += g; bSum += b; cnt++;
+    const lightness = (Math.max(r, g, b) + Math.min(r, g, b)) / 2;
+    if (lightness >= 32 && lightness <= 230) { rSumMid += r; gSumMid += g; bSumMid += b; cntMid++; }
   }
-  const avgColor = cnt > 0 ? [rSum / cnt, gSum / cnt, bSum / cnt] : [BOX_BG[0], BOX_BG[1], BOX_BG[2]];
+  const avgColor = cntMid >= Math.max(5, cnt * 0.15)
+    ? [rSumMid / cntMid, gSumMid / cntMid, bSumMid / cntMid]
+    : cnt > 0 ? [rSum / cnt, gSum / cnt, bSum / cnt] : [BOX_BG[0], BOX_BG[1], BOX_BG[2]];
 
   const scale = Math.min((SIG_SIZE - 2 * SIG_MARGIN) / cw, (SIG_SIZE - 2 * SIG_MARGIN) / ch);
   const nw = Math.max(1, Math.round(cw * scale)), nh = Math.max(1, Math.round(ch * scale));
@@ -741,11 +820,13 @@ function setMode(mode) {
   resultsEl.hidden = mode !== "list";
   stepModeEl.hidden = mode !== "step";
   render();
+  pushSyncState();
 }
 
 function goToStep(idx) {
   state.stepIndex = clamp(idx, 0, state.pageRecords.length - 1);
   renderStepMode();
+  pushSyncState();
 }
 
 function makePartCard(bucket, qty, unsure, pages) {
@@ -875,3 +956,180 @@ qrClose.addEventListener("click", () => { qrOverlay.hidden = true; });
 qrOverlay.addEventListener("click", (e) => { if (e.target === qrOverlay) qrOverlay.hidden = true; });
 
 initLanBanner();
+
+// ---------- update check ----------
+
+// A static site can't safely rewrite its own files from the browser, so this
+// can only check-and-notify, not silently self-update. Failing silently
+// (offline, GitHub unreachable, blocked by a firewall) is intentional - this
+// must never get in the way of using the app itself.
+function isNewerVersion(remote, local) {
+  const r = remote.split(".").map(Number);
+  const l = local.split(".").map(Number);
+  for (let i = 0; i < Math.max(r.length, l.length); i++) {
+    const rv = r[i] || 0, lv = l[i] || 0;
+    if (rv > lv) return true;
+    if (rv < lv) return false;
+  }
+  return false;
+}
+
+async function checkForUpdate() {
+  try {
+    const res = await fetch(VERSION_CHECK_URL, { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (data.version && isNewerVersion(data.version, APP_VERSION)) {
+      updateText.textContent = `У вас v${APP_VERSION}, на GitHub — v${data.version}`;
+      updateBanner.hidden = false;
+    }
+  } catch (e) {
+    // offline, or fetch blocked (e.g. opened via file:// in a stricter browser) - not worth surfacing
+  }
+}
+
+checkForUpdate();
+
+// ---------- LAN sync (remote control + shared PDF source) ----------
+
+function syncPayload() {
+  return {
+    pdfVersion: lastLoadedPdfVersion,
+    from: state.from || parseInt(pageFrom.value, 10) || null,
+    to: state.to || parseInt(pageTo.value, 10) || null,
+    mode: state.mode,
+    sortMode: state.sortMode,
+    stepIndex: state.stepIndex,
+  };
+}
+
+async function pushSyncState() {
+  if (!syncAvailable || suppressSyncPush) return;
+  try {
+    const res = await fetch("/api/state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(syncPayload()),
+    });
+    if (res.ok) {
+      const data = await res.json();
+      lastSyncedStateVersion = data.version; // so the next poll doesn't re-apply our own echo
+    }
+  } catch (e) {
+    // offline mid-session - this push is just lost, next user action retries
+  }
+}
+
+async function pushSyncedPdf(file, buf) {
+  try {
+    const res = await fetch("/api/pdf", {
+      method: "POST",
+      headers: { "X-File-Name": encodeURIComponent(file.name) },
+      body: buf,
+    });
+    if (res.ok) {
+      const data = await res.json();
+      lastLoadedPdfVersion = data.version;
+      pushSyncState();
+    }
+  } catch (e) {
+    // the other device just won't receive this file - not fatal
+  }
+}
+
+async function detectSync() {
+  try {
+    const res = await fetch("/api/state", { cache: "no-store" });
+    if (!res.ok) return;
+    const data = await res.json();
+    if (typeof data.version !== "number") return;
+    syncAvailable = true;
+    lastSyncedStateVersion = data.version;
+    lanBannerSubtitle.textContent = "Устройства синхронизированы: страница, сортировка и файл общие";
+    setInterval(syncTick, 1500);
+  } catch (e) {
+    // not served via tools/lan_server.py - plain static hosting, sync stays off
+  }
+}
+
+async function syncTick() {
+  try {
+    const [stateRes, metaRes] = await Promise.all([
+      fetch("/api/state", { cache: "no-store" }),
+      fetch("/api/pdf/meta", { cache: "no-store" }),
+    ]);
+    const stateData = stateRes.ok ? await stateRes.json() : null;
+    const meta = metaRes.ok ? await metaRes.json() : null;
+    const d = (stateData && stateData.data) || {};
+
+    if (meta && meta.hasFile && meta.version !== lastLoadedPdfVersion) {
+      await adoptSyncedPdf(meta, d);
+    }
+
+    if (stateData && stateData.version > lastSyncedStateVersion) {
+      lastSyncedStateVersion = stateData.version;
+      applyRemoteNav(d);
+    }
+  } catch (e) {
+    // transient network hiccup - next tick tries again
+  }
+}
+
+async function adoptSyncedPdf(meta, remoteState) {
+  suppressSyncPush = true;
+  try {
+    const res = await fetch("/api/pdf", { cache: "no-store" });
+    if (!res.ok) return;
+    const buf = await res.arrayBuffer();
+    pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+    lastLoadedPdfVersion = meta.version;
+    fileInfo.textContent = `${decodeURIComponent(meta.name || "instructions.pdf")} — ${pdfDoc.numPages} стр. (с другого устройства)`;
+    pageFrom.max = pdfDoc.numPages; pageTo.max = pdfDoc.numPages;
+    pageFrom.value = remoteState.from || 1;
+    pageTo.value = remoteState.to || Math.min(pdfDoc.numPages, 150);
+    rangeFields.hidden = false;
+    actionField.hidden = false;
+  } catch (err) {
+    console.error("Не удалось получить PDF с другого устройства", err);
+    return;
+  } finally {
+    suppressSyncPush = false;
+  }
+  if (remoteState.from && remoteState.to) await maybeAutoAnalyze(remoteState);
+}
+
+async function maybeAutoAnalyze(remoteState) {
+  const key = `${lastLoadedPdfVersion}:${remoteState.from}:${remoteState.to}`;
+  if (key === lastAnalyzedKey || !pdfDoc) return;
+  lastAnalyzedKey = key;
+  suppressSyncPush = true;
+  try {
+    pageFrom.value = remoteState.from;
+    pageTo.value = remoteState.to;
+    await runAnalysis();
+  } finally {
+    suppressSyncPush = false;
+  }
+  applyRemoteNav(remoteState);
+}
+
+function applyRemoteNav(d) {
+  suppressSyncPush = true;
+  try {
+    if (d.sortMode && d.sortMode !== state.sortMode) {
+      state.sortMode = d.sortMode;
+      sortSelect.value = d.sortMode;
+    }
+    if (state.pageRecords.length) {
+      if (d.mode && d.mode !== state.mode) setMode(d.mode);
+      else if (typeof d.stepIndex === "number" && d.stepIndex !== state.stepIndex) goToStep(d.stepIndex);
+      else render();
+    } else if (d.from && d.to && pdfDoc) {
+      maybeAutoAnalyze(d);
+    }
+  } finally {
+    suppressSyncPush = false;
+  }
+}
+
+detectSync();
