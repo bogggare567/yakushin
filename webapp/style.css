@@ -207,8 +207,42 @@ button:active:not(:disabled) {
   color: var(--text-dim);
 }
 
+.session-header {
+  margin-top: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  animation: fadeInUp 0.3s ease;
+}
+
+.session-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.change-range-btn {
+  flex: 0 0 auto;
+  width: auto;
+  padding: 7px 14px;
+  font-size: 0.82rem;
+  font-weight: 500;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.change-range-btn:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
+
 .summary {
-  margin-top: 18px;
+  margin-top: 12px;
   display: flex;
   gap: 20px;
   flex-wrap: wrap;
@@ -224,6 +258,18 @@ button:active:not(:disabled) {
 .summary b {
   color: var(--text);
   font-size: 1.1rem;
+}
+
+.empty-hint {
+  grid-column: 1 / -1;
+  padding: 32px 20px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 0.92rem;
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  animation: fadeInUp 0.3s ease;
 }
 
 .results {

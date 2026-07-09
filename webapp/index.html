@@ -40,14 +40,14 @@
   </div>
 
   <section class="panel" id="setup-panel">
-    <div class="field">
-      <label for="pdf-input">1. Выберите PDF-инструкцию</label>
+    <div class="field" id="file-field">
+      <label for="pdf-input">Выберите PDF-инструкцию</label>
       <input type="file" id="pdf-input" accept="application/pdf" />
       <div class="file-info" id="file-info"></div>
     </div>
 
     <div class="field range-fields" id="range-fields" hidden>
-      <label>2. Диапазон страниц</label>
+      <label>Диапазон страниц</label>
       <div class="range-row">
         <input type="number" id="page-from" min="1" step="1" placeholder="от" />
         <span>—</span>
@@ -64,6 +64,11 @@
       <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
       <div class="progress-label" id="progress-label"></div>
     </div>
+  </section>
+
+  <section class="session-header" id="session-header" hidden>
+    <h2 class="session-title" id="session-title"></h2>
+    <button type="button" class="change-range-btn" id="change-range-btn">Изменить диапазон страниц</button>
   </section>
 
   <section class="summary" id="summary" hidden></section>

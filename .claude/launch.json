@@ -6,6 +6,12 @@
       "runtimeExecutable": "python3",
       "runtimeArgs": ["tools/lan_server.py", "8934", "webapp"],
       "port": 8934
+    },
+    {
+      "name": "webapp-dev",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["tools/lan_server.py", "8944", "webapp"],
+      "port": 8944
     }
   ]
 }

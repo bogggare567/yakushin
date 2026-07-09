@@ -62,6 +62,10 @@ const updateBanner = document.getElementById("update-banner");
 const updateText = document.getElementById("update-text");
 const updateLink = document.getElementById("update-link");
 const setupPanelEl = document.getElementById("setup-panel");
+const fileFieldEl = document.getElementById("file-field");
+const sessionHeaderEl = document.getElementById("session-header");
+const sessionTitleEl = document.getElementById("session-title");
+const changeRangeBtn = document.getElementById("change-range-btn");
 const sidebarNewBtn = document.getElementById("sidebar-new-btn");
 const sidebarSessionsEl = document.getElementById("sidebar-sessions");
 
@@ -80,6 +84,8 @@ let sessionNameOverride = null;
 let pendingResumeCollected = null;
 let pendingResumeState = null; // {sortMode, mode, stepIndex}
 let resumeAfterReselect = false; // true while waiting for the user to manually re-pick a session's PDF (cache miss)
+let activeRunToken = 0; // bumped by startNewSession()/resumeSession() to abandon any in-flight runAnalysis()
+let localRangeEditInProgress = false; // true while "Изменить диапазон страниц" is open, so remote sync nav can't yank the screen away mid-edit
 
 // LAN sync (see tools/lan_server.py): lets a second device on the same
 // Wi-Fi act as a remote control (step navigation, sort, mode) and/or as the
@@ -183,6 +189,12 @@ async function onPdfSelected(e) {
 
 async function runAnalysis() {
   if (!pdfDoc) return;
+  // Guards against a slow analysis (hundreds of pages) still running when the
+  // user deletes this session or starts a new one mid-flight: startNewSession()
+  // and resumeSession() both bump activeRunToken, so a stale run notices it's
+  // been abandoned and bails out instead of reviving a stale results view.
+  const myRunToken = ++activeRunToken;
+  localRangeEditInProgress = false; // submitted - remote sync nav is safe to act on again
   const from = clamp(parseInt(pageFrom.value, 10) || 1, 1, pdfDoc.numPages);
   const to = clamp(parseInt(pageTo.value, 10) || from, from, pdfDoc.numPages);
 
@@ -199,12 +211,35 @@ async function runAnalysis() {
     for (const idx of pendingResumeCollected) state.collected.add(idx);
   }
 
+  // Create/persist the session right away, before a single page is
+  // processed - it should appear in the sidebar the moment you hit "collect",
+  // like a new chat appearing as soon as you send the first message, not
+  // only once the whole analysis finishes.
+  state.from = from;
+  state.to = to;
+  state.buckets = [];
+  state.pageRecords = [];
+  if (!currentSessionId) {
+    currentSessionId = crypto.randomUUID();
+    sessionCreatedAt = Date.now();
+  }
+  if (!currentPdfFilePersisted && currentPdfBytesForSession && currentFileKey) {
+    // Not awaited on purpose - see note below on the final save.
+    const bytesToSave = currentPdfBytesForSession, keyToSave = currentFileKey;
+    hasSessionFile(keyToSave)
+      .then((exists) => (exists ? null : putSessionFile(keyToSave, bytesToSave)))
+      .catch((err) => console.error("Не удалось сохранить PDF сессии локально (возможно, не хватило места)", err));
+    currentPdfFilePersisted = true;
+  }
+  await saveSessionMeta();
+
   const buckets = [];
   const pageRecords = [];
   const totalPages = to - from + 1;
   let pagesWithParts = 0;
 
   for (let pageNum = from; pageNum <= to; pageNum++) {
+    if (myRunToken !== activeRunToken) return; // abandoned - a newer run took over
     setProgress((pageNum - from) / totalPages, `Страница ${pageNum} из ${to} (${from}-${to})`);
     try {
       const { items, thumbDataUrl } = await processPage(pageNum);
@@ -223,40 +258,17 @@ async function runAnalysis() {
     await new Promise((r) => setTimeout(r, 0));
   }
 
+  if (myRunToken !== activeRunToken) return; // abandoned while the loop ran
+
   setProgress(1, "Готово");
   progressFill.classList.remove("is-active");
   state.buckets = buckets;
   state.pageRecords = pageRecords;
-  state.from = from;
-  state.to = to;
   state.pagesWithParts = pagesWithParts;
   state.stepIndex = 0;
   viewControls.hidden = false;
   setupPanelEl.hidden = true;
-
-  if (!currentSessionId) {
-    currentSessionId = crypto.randomUUID();
-    sessionCreatedAt = Date.now();
-  }
-  if (!currentPdfFilePersisted && currentPdfBytesForSession && currentFileKey) {
-    // Several sessions can point at the same physical file (same name+size,
-    // e.g. re-analyzing different page ranges of one big instruction PDF) -
-    // storing it under a content fingerprint instead of the session id means
-    // only one copy of a 100+MB file ever sits in IndexedDB, however many
-    // sessions use it. Without this, every fresh analysis wrote a full new
-    // copy and storage (and each write) ballooned within a few tries.
-    //
-    // Not awaited on purpose: writing a 100+MB blob to IndexedDB can take a
-    // real amount of time, and blocking here made the UI look hung right as
-    // results were ready to show. It runs in the background instead; if the
-    // tab closes before it finishes, only local caching is lost, not the
-    // just-computed results.
-    const bytesToSave = currentPdfBytesForSession, keyToSave = currentFileKey;
-    hasSessionFile(keyToSave)
-      .then((exists) => (exists ? null : putSessionFile(keyToSave, bytesToSave)))
-      .catch((err) => console.error("Не удалось сохранить PDF сессии локально (возможно, не хватило места)", err));
-    currentPdfFilePersisted = true;
-  }
+  sessionHeaderEl.hidden = false;
 
   if (pendingResumeState) {
     if (pendingResumeState.sortMode) { state.sortMode = pendingResumeState.sortMode; sortSelect.value = pendingResumeState.sortMode; }
@@ -1213,6 +1225,11 @@ function renderListMode() {
     <div>Всего деталей: <b>${totalBricks}</b></div>
   `;
 
+  if (buckets.length === 0) {
+    resultsEl.innerHTML = `<div class="empty-hint">На страницах ${from}–${to} не нашлось ни одной детали — попробуйте другой диапазон (кнопка «Изменить диапазон страниц» выше).</div>`;
+    return;
+  }
+
   renderPartCards(resultsEl, buckets, state.sortMode, {
     getBucket: (b) => b,
     getCount: (b) => b.count,
@@ -1398,6 +1415,7 @@ async function saveSessionMeta() {
   } catch (err) {
     console.error("Не удалось сохранить сессию локально", err);
   }
+  sessionTitleEl.textContent = meta.name;
   renderLibrary();
 }
 
@@ -1519,6 +1537,9 @@ function makeSessionRow(meta) {
 // Resets to a blank setup screen, same as a fresh page load - used by the
 // sidebar's "+ Новая сессия" button and after deleting the active session.
 function startNewSession() {
+  activeRunToken++; // abandon any analysis still running for the previous session
+  localRangeEditInProgress = false;
+  analyzeBtn.disabled = false;
   currentSessionId = null;
   currentPdfName = null;
   currentFileKey = null;
@@ -1533,6 +1554,7 @@ function startNewSession() {
 
   pdfInput.value = "";
   fileInfo.textContent = "";
+  fileFieldEl.hidden = false;
   rangeFields.hidden = true;
   actionField.hidden = true;
   progressWrap.hidden = true;
@@ -1542,6 +1564,7 @@ function startNewSession() {
   state.collected.clear();
   summaryEl.hidden = true;
   viewControls.hidden = true;
+  sessionHeaderEl.hidden = true;
   resultsEl.innerHTML = "";
   resultsEl.hidden = true;
   stepModeEl.hidden = true;
@@ -1550,12 +1573,39 @@ function startNewSession() {
   renderLibrary();
 }
 
+// Lets you re-run the same session with a different page range without
+// re-picking the file - pdfDoc is already sitting in memory. Hides just the
+// file picker (already chosen) and re-reveals the range/analyze controls.
+changeRangeBtn.addEventListener("click", () => {
+  localRangeEditInProgress = true;
+  fileFieldEl.hidden = true;
+  setupPanelEl.hidden = false;
+  rangeFields.hidden = false;
+  actionField.hidden = false;
+  // hide the previous range's results while the picker is reopened, instead
+  // of showing a stale part grid alongside the "pick a new range" controls -
+  // also clears pageRecords so a remote sync nav arriving in this window
+  // can't pop the old results back over the screen the user is editing
+  state.buckets = [];
+  state.pageRecords = [];
+  summaryEl.hidden = true;
+  viewControls.hidden = true;
+  resultsEl.hidden = true;
+  stepModeEl.hidden = true;
+  setupPanelEl.scrollIntoView({ behavior: "smooth", block: "start" });
+  pageFrom.focus();
+});
+
 sidebarNewBtn.addEventListener("click", startNewSession);
 
 async function resumeSession(id) {
   const sessions = await getAllSessions();
   const meta = sessions.find((s) => s.id === id);
   if (!meta) return;
+
+  activeRunToken++; // abandon any analysis still running for the previous session
+  localRangeEditInProgress = false;
+  analyzeBtn.disabled = false;
 
   // clear whatever the previously-open session left on screen before
   // switching, so nothing stale is visible while the new one loads
@@ -1564,10 +1614,12 @@ async function resumeSession(id) {
   state.collected.clear();
   summaryEl.hidden = true;
   viewControls.hidden = true;
+  sessionHeaderEl.hidden = true;
   resultsEl.innerHTML = "";
   resultsEl.hidden = true;
   stepModeEl.hidden = true;
   setupPanelEl.hidden = false;
+  fileFieldEl.hidden = false;
 
   currentSessionId = meta.id;
   currentPdfName = meta.pdfName;
@@ -1774,14 +1826,36 @@ async function syncTick() {
 }
 
 async function adoptSyncedPdf(meta, remoteState) {
+  const myToken = activeRunToken;
   suppressSyncPush = true;
   try {
     const res = await fetch("/api/pdf", { cache: "no-store" });
     if (!res.ok) return;
     const buf = await res.arrayBuffer();
-    pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+    if (myToken !== activeRunToken) return; // abandoned locally (e.g. "+ Новая сессия") while fetching
+    // pdfjs may transfer/detach buf, so grab the bytes we need to keep first
+    const bytesForSession = buf.slice(0);
+    const newPdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+    if (myToken !== activeRunToken) return; // abandoned locally while parsing
+
+    // A synced PDF is a different file from whatever session (if any) happens
+    // to be open locally - treat it like a fresh upload (onPdfSelected does
+    // the same reset) instead of silently overwriting an unrelated session's
+    // stored range/buckets with this device's data.
+    currentSessionId = null;
+    sessionCreatedAt = null;
+    sessionNameOverride = null;
+    pendingResumeCollected = null;
+    pendingResumeState = null;
+    currentPdfFilePersisted = false;
+    const decodedName = decodeURIComponent(meta.name || "instructions.pdf");
+    currentPdfName = decodedName;
+    currentFileKey = fileKeyFor(decodedName, bytesForSession.byteLength);
+    currentPdfBytesForSession = bytesForSession;
+
+    pdfDoc = newPdfDoc;
     lastLoadedPdfVersion = meta.version;
-    fileInfo.textContent = `${decodeURIComponent(meta.name || "instructions.pdf")} — ${pdfDoc.numPages} стр. (с другого устройства)`;
+    fileInfo.textContent = `${decodedName} — ${pdfDoc.numPages} стр. (с другого устройства)`;
     pageFrom.max = pdfDoc.numPages; pageTo.max = pdfDoc.numPages;
     pageFrom.value = remoteState.from || 1;
     pageTo.value = remoteState.to || Math.min(pdfDoc.numPages, 150);
@@ -1800,6 +1874,7 @@ async function maybeAutoAnalyze(remoteState) {
   const key = `${lastLoadedPdfVersion}:${remoteState.from}:${remoteState.to}`;
   if (key === lastAnalyzedKey || !pdfDoc) return;
   lastAnalyzedKey = key;
+  const myToken = activeRunToken;
   suppressSyncPush = true;
   try {
     pageFrom.value = remoteState.from;
@@ -1808,10 +1883,14 @@ async function maybeAutoAnalyze(remoteState) {
   } finally {
     suppressSyncPush = false;
   }
-  applyRemoteNav(remoteState);
+  // don't act on remote nav for a run that got abandoned locally meanwhile
+  if (myToken === activeRunToken) applyRemoteNav(remoteState);
 }
 
 function applyRemoteNav(d) {
+  // don't let a remote device yank the screen away from a range the user is
+  // actively editing locally via "Изменить диапазон страниц"
+  if (localRangeEditInProgress) return;
   suppressSyncPush = true;
   try {
     if (d.sortMode && d.sortMode !== state.sortMode) {
