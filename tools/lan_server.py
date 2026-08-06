@@ -11,8 +11,21 @@ Usage: python3 lan_server.py [port] [webapp_dir]
 import http.server
 import json
 import os
+import subprocess
 import sys
 import threading
+
+def stable_hostname():
+    """The machine's Bonjour/mDNS name (e.g. "MacBook-Air-Bogdan.local"), which
+    stays the same even when the router hands out a different IP. Returns None
+    where that isn't available, in which case callers fall back to the IP."""
+    try:
+        name = subprocess.run(["scutil", "--get", "LocalHostName"],
+                              capture_output=True, text=True, timeout=2).stdout.strip()
+        return f"{name}.local" if name else None
+    except Exception:
+        return None
+
 
 STATE_LOCK = threading.Lock()
 STATE = {"version": 0, "data": {}}
@@ -31,6 +44,13 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.path.startswith("/api/info"):
+            # The Wi-Fi IP is handed out by the router and changes between
+            # sessions, which silently breaks any link bookmarked on a phone.
+            # The Bonjour/mDNS ".local" name does not change, so offer it as
+            # the address worth saving.
+            self._send_json({"stableHost": stable_hostname(), "port": self.server.server_address[1]})
+            return
         if self.path.startswith("/api/state"):
             with STATE_LOCK:
                 self._send_json(STATE)

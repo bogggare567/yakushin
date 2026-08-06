@@ -319,9 +319,41 @@ button:active:not(:disabled) {
   transition: transform var(--transition-fast) ease, box-shadow var(--transition-fast) ease, border-color var(--transition-fast) ease, opacity var(--transition-fast) ease;
 }
 
-/* tap a card to mark it as already found while building */
+/* the check button marks a part found; the card itself opens the page viewer */
+.part-check {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 2;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  line-height: 1;
+  opacity: 0.55;
+  transition: opacity var(--transition-fast) ease, background var(--transition-fast) ease, color var(--transition-fast) ease;
+}
+
+.part-card:hover .part-check { opacity: 1; }
+
+.part-check:hover {
+  background: color-mix(in srgb, var(--good) 25%, var(--panel-2));
+  color: var(--good);
+}
+
+.part-card.collected .part-check {
+  opacity: 1;
+  background: var(--good);
+  border-color: var(--good);
+  color: #06231a;
+}
+
 .part-card.collected {
-  opacity: 0.4;
+  opacity: 0.45;
 }
 
 .part-card.collected img {
@@ -669,6 +701,188 @@ input[type="range"] {
   padding: 9px 16px;
   font-size: 0.85rem;
   flex-shrink: 0;
+}
+
+.qr-stable {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+  word-break: break-all;
+}
+
+.qr-stable b { color: var(--text); }
+
+/* ---------- per-part page viewer ---------- */
+
+.part-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 6, 9, 0.86);
+  z-index: 1100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  animation: fadeIn 0.18s ease;
+}
+
+.part-sheet {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: min(980px, 100%);
+  max-height: 92vh;
+  max-height: 92dvh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  animation: fadeInUp 0.22s ease;
+}
+
+.part-sheet-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.part-sheet-head img {
+  width: 64px;
+  height: 52px;
+  object-fit: contain;
+  background: #dceefc;
+  border-radius: 8px;
+  flex: 0 0 auto;
+}
+
+.part-sheet-meta { flex: 1; min-width: 0; }
+
+.part-sheet-title {
+  font-weight: 600;
+  font-size: 0.95rem;
+  margin-bottom: 6px;
+}
+
+.part-sheet-pagelist {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  max-height: 58px;
+  overflow-y: auto;
+}
+
+.part-page-chip {
+  width: auto;
+  padding: 2px 9px;
+  font-size: 0.76rem;
+  font-weight: 500;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+
+.part-page-chip:hover { color: var(--text); }
+
+.part-page-chip.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.part-sheet-close {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 1rem;
+}
+
+.part-sheet-close:hover { background: var(--panel-2); color: var(--text); }
+
+.part-sheet-nav {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+}
+
+.part-sheet-nav button {
+  width: 44px;
+  flex: 0 0 auto;
+  padding: 8px 0;
+  font-size: 1.05rem;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+.part-sheet-nav button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+
+.part-sheet-pos {
+  flex: 1;
+  text-align: center;
+  font-size: 0.9rem;
+  font-weight: 600;
+}
+
+.part-sheet-page {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  margin: 0 14px;
+  border-radius: 10px;
+  overflow: hidden;
+  cursor: zoom-in;
+  /* transparent, so the letterbox bars around a page read as part of the
+     sheet rather than as a big empty white slab */
+  background: transparent;
+}
+
+.part-sheet-page img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+.part-highlight {
+  position: absolute;
+  border: 3px solid var(--warn);
+  border-radius: 4px;
+  box-shadow: 0 0 0 2000px rgba(8, 10, 14, 0.45);
+  pointer-events: none;
+  animation: partPulse 1.6s ease-in-out infinite;
+}
+
+@keyframes partPulse {
+  0%, 100% { border-color: var(--warn); }
+  50% { border-color: color-mix(in srgb, var(--warn) 45%, transparent); }
+}
+
+.part-sheet-hint {
+  padding: 10px 14px 12px;
+  font-size: 0.76rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+@media (max-width: 560px) {
+  .part-overlay { padding: 0; }
+  .part-sheet { max-height: 100dvh; height: 100dvh; border-radius: 0; border: none; width: 100%; }
+  .part-sheet-head img { width: 48px; height: 42px; }
+  .part-sheet-hint { display: none; }
 }
 
 .qr-overlay {

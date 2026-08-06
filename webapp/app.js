@@ -1,7 +1,7 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
-const APP_VERSION = "1.4.0";
+const APP_VERSION = "1.5.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -57,10 +57,22 @@ const lanQrBtn = document.getElementById("lan-qr-btn");
 const qrOverlay = document.getElementById("qr-overlay");
 const qrCanvasHolder = document.getElementById("qr-canvas-holder");
 const qrUrl = document.getElementById("qr-url");
+const qrStable = document.getElementById("qr-stable");
 const qrClose = document.getElementById("qr-close");
 const updateBanner = document.getElementById("update-banner");
 const updateText = document.getElementById("update-text");
 const updateLink = document.getElementById("update-link");
+const partOverlay = document.getElementById("part-overlay");
+const partSheetThumb = document.getElementById("part-sheet-thumb");
+const partSheetTitle = document.getElementById("part-sheet-title");
+const partSheetPagelist = document.getElementById("part-sheet-pagelist");
+const partSheetClose = document.getElementById("part-sheet-close");
+const partPrevBtn = document.getElementById("part-prev");
+const partNextBtn = document.getElementById("part-next");
+const partSheetPos = document.getElementById("part-sheet-pos");
+const partSheetPage = document.getElementById("part-sheet-page");
+const partPageImg = document.getElementById("part-page-img");
+const partHighlight = document.getElementById("part-highlight");
 const setupPanelEl = document.getElementById("setup-panel");
 const fileFieldEl = document.getElementById("file-field");
 const sessionHeaderEl = document.getElementById("session-header");
@@ -254,7 +266,7 @@ async function runAnalysis() {
       for (const it of items) {
         const bucketIdx = addToBuckets(buckets, it, pageNum);
         const qty = it.qty ?? 1;
-        pageItems.push({ bucketIdx, qty, unsure: it.unsure || it.qty === null });
+        pageItems.push({ bucketIdx, qty, unsure: it.unsure || it.qty === null, rect: it.rect });
       }
       pageRecords.push({ pageNum, thumbDataUrl, items: pageItems });
     } catch (err) {
@@ -337,6 +349,16 @@ async function processPage(pageNum) {
   const items = [];
   for (const box of boxes) {
     items.push(...extractBoxItems(canvas, ctx, box));
+  }
+  // store positions as fractions of the page, so the highlight lands correctly
+  // whatever size the page image is displayed at
+  for (const it of items) {
+    it.rect = {
+      x: it.rect.x / canvas.width,
+      y: it.rect.y / canvas.height,
+      w: it.rect.w / canvas.width,
+      h: it.rect.h / canvas.height,
+    };
   }
   const thumbDataUrl = makePageThumb(canvas);
   return { items, thumbDataUrl };
@@ -580,7 +602,14 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
       qtyResult = readQuantity(subData, w, cs, ce, r0 + effSplit, r0 + slotH - 1);
     }
 
-    results.push({ imgCanvas, qty: qtyResult.qty, unsure: qtyResult.unsure });
+    // where this item sits on the page (icon + its quantity label), so the
+    // part viewer can point straight at it instead of making you hunt
+    results.push({
+      imgCanvas,
+      qty: qtyResult.qty,
+      unsure: qtyResult.unsure,
+      rect: { x: x0 + cs, y: y0 + r0, w: ce - cs, h: slotH },
+    });
   }
   return results;
 }
@@ -756,6 +785,7 @@ function autocropCanvas(canvas) {
 const COLOR_MODE_BIN = 32; // quantization step for finding the icon's dominant color
 const COLOR_MODE_AMBIGUOUS_SHARE = 0.10; // below this, no single bin is trustworthy on its own
 const COLOR_MODE_MERGE_RADIUS = 45; // chebyshev color-distance (0-255) used by the mode-seek fallback
+const TEXTURE_TOL = 0.03; // max surface-texture difference for two icons to be the same part
 
 function computeSignature(canvas) {
   const cw = canvas.width, ch = canvas.height;
@@ -830,7 +860,95 @@ function computeSignature(canvas) {
     const dr = Math.abs(data[i] - BOX_BG[0]), dg = Math.abs(data[i + 1] - BOX_BG[1]), db = Math.abs(data[i + 2] - BOX_BG[2]);
     fgGrid[p] = Math.max(dr, dg, db) > FG_DIFF_THRESHOLD ? 1 : 0;
   }
-  return { grid, fgGrid, avgColor };
+  return { grid, fgGrid, avgColor, texture: surfaceTexture(odata, cw, ch) };
+}
+
+// A studded plate and a smooth tile with the same footprint and colour differ
+// in exactly one thing: surface texture. At the 14x14 signature resolution
+// that difference is far too subtle to register - measured over 450 real
+// icons, plate-vs-tile grid distances (16-42) sit *below* the distances
+// between the same part drawn at two different scales (up to 40), so no grid
+// resolution or tolerance can separate them; raising SIG_SIZE to 20/24/32 only
+// widened the overlap. Measure the texture directly instead: high-frequency
+// energy inside the part, divided by the part's own contrast range (so a black
+// part isn't penalised for being dark) with a blur radius proportional to the
+// icon (so the render scale doesn't matter). LEGO callout boxes shrink their
+// icons when a box holds more items, which is what made scale the dominant
+// noise source in the first place.
+// Validated on pages 1-150 of the real file: splits 5/5 known plate-vs-tile
+// merges, with zero same-part buckets fragmenting.
+function surfaceTexture(odata, cw, ch) {
+  const n = cw * ch;
+  const lum = new Float64Array(n);
+  let fg = new Uint8Array(n);
+  let fgCount = 0;
+  for (let p = 0, i = 0; p < n; p++, i += 4) {
+    lum[p] = (odata[i] + odata[i + 1] + odata[i + 2]) / 3;
+    const dr = Math.abs(odata[i] - BOX_BG[0]);
+    const dg = Math.abs(odata[i + 1] - BOX_BG[1]);
+    const db = Math.abs(odata[i + 2] - BOX_BG[2]);
+    if (Math.max(dr, dg, db) > FG_DIFF_THRESHOLD) { fg[p] = 1; fgCount++; }
+  }
+  if (fgCount < 40) return 0;
+
+  // Pull the measurement away from the part's outline, which is a hard edge on
+  // every part and would otherwise swamp the surface detail we're after.
+  const erode = (src) => {
+    const out = new Uint8Array(n);
+    for (let y = 0; y < ch; y++) {
+      for (let x = 0; x < cw; x++) {
+        if (!src[y * cw + x]) continue;
+        let all = 1;
+        for (let dy = -1; dy <= 1 && all; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const ny = y + dy, nx = x + dx;
+            if (ny < 0 || nx < 0 || ny >= ch || nx >= cw || !src[ny * cw + nx]) { all = 0; break; }
+          }
+        }
+        out[y * cw + x] = all;
+      }
+    }
+    return out;
+  };
+  let inside = erode(erode(fg));
+  let insideCount = 0;
+  for (let p = 0; p < n; p++) insideCount += inside[p];
+  if (insideCount < 20) { inside = fg; insideCount = fgCount; }
+
+  // integral image -> O(1) local mean at any radius, so a big icon is no slower
+  const ii = new Float64Array((cw + 1) * (ch + 1));
+  for (let y = 0; y < ch; y++) {
+    let rowSum = 0;
+    for (let x = 0; x < cw; x++) {
+      rowSum += lum[y * cw + x];
+      ii[(y + 1) * (cw + 1) + (x + 1)] = ii[y * (cw + 1) + (x + 1)] + rowSum;
+    }
+  }
+  const r = Math.max(1, Math.round(Math.max(1, Math.min(cw, ch) / 12)));
+  let sum = 0, sumSq = 0;
+  for (let y = 0; y < ch; y++) {
+    const y0 = Math.max(0, y - r), y1 = Math.min(ch, y + r + 1);
+    for (let x = 0; x < cw; x++) {
+      if (!inside[y * cw + x]) continue;
+      const x0 = Math.max(0, x - r), x1 = Math.min(cw, x + r + 1);
+      const total = ii[y1 * (cw + 1) + x1] - ii[y0 * (cw + 1) + x1]
+                  - ii[y1 * (cw + 1) + x0] + ii[y0 * (cw + 1) + x0];
+      const hp = lum[y * cw + x] - total / ((y1 - y0) * (x1 - x0));
+      sum += hp; sumSq += hp * hp;
+    }
+  }
+  const mean = sum / insideCount;
+  const std = Math.sqrt(Math.max(0, sumSq / insideCount - mean * mean));
+
+  // the part's own light-to-dark range, via a histogram (5th..95th percentile)
+  const hist = new Uint32Array(256);
+  for (let p = 0; p < n; p++) if (fg[p]) hist[Math.min(255, Math.max(0, Math.round(lum[p])))]++;
+  const pct = (frac) => {
+    let target = frac * fgCount, acc = 0;
+    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= target) return v; }
+    return 255;
+  };
+  return std / Math.max(pct(0.95) - pct(0.05), 8);
 }
 
 function modeSeekColor(bins, fgPixels) {
@@ -891,7 +1009,9 @@ function colorDist(a, b) {
 
 function findBucket(buckets, sig) {
   return buckets.find(
-    (b) => colorDist(b.avgColor, sig.avgColor) <= COLOR_TOL && gridDist(b, sig) <= SIG_DIST_TOL
+    (b) => colorDist(b.avgColor, sig.avgColor) <= COLOR_TOL
+      && Math.abs(b.texture - sig.texture) <= TEXTURE_TOL
+      && gridDist(b, sig) <= SIG_DIST_TOL
   );
 }
 
@@ -905,6 +1025,7 @@ function addToBuckets(buckets, item, pageNum) {
       grid: sig.grid,
       fgGrid: sig.fgGrid,
       avgColor: sig.avgColor,
+      texture: sig.texture,
       count: 0,
       unsure: false,
       pages: new Set(),
@@ -1192,25 +1313,144 @@ function makePartCard(bucket, qty, unsure, pages, bucketIdx) {
   card.className = "part-card" + (state.collected.has(bucketIdx) ? " collected" : "");
   const pagesArr = pages.slice().sort((x, y) => x - y);
   card.innerHTML = `
+    <button type="button" class="part-check" aria-label="Отметить как собранную" title="Отметить как собранную">✓</button>
     <img src="${bucket.thumbUrl}" alt="деталь" loading="lazy" />
     <div class="part-qty ${unsure ? "unsure" : ""}">×${qty}${unsure ? " ?" : ""}</div>
     <div class="part-pages">стр. ${summarizePages(pagesArr)}</div>
   `;
-  // Click to mark a part as already collected while building - purely a
-  // visual crossed-out/dimmed toggle so you can tell at a glance what's
-  // still left to find in the pile. Saved into the session, so it survives reopening.
-  card.addEventListener("click", () => {
+  card.title = `Открыть страницы, где встречается эта деталь: ${pagesArr.join(", ")}`;
+
+  // The check button marks a part as already found while building (dimmed +
+  // struck through, saved into the session). It's a separate control from the
+  // card itself, because tapping the card now opens the page viewer - the
+  // whole point being to check whether the part was recognised correctly.
+  card.querySelector(".part-check").addEventListener("click", (e) => {
+    e.stopPropagation();
     if (state.collected.has(bucketIdx)) state.collected.delete(bucketIdx);
     else state.collected.add(bucketIdx);
     card.classList.toggle("collected", state.collected.has(bucketIdx));
     saveSessionMeta();
   });
+
+  card.addEventListener("click", () => openPartPages(bucketIdx));
   return card;
 }
 
+// ---------- per-part page viewer ----------
+// Flip through only the pages where one specific part was found, with the spot
+// it was found in outlined - so a wrong recognition is obvious immediately
+// instead of having to hunt the page by eye.
+
+let partViewer = null; // { bucketIdx, entries: [{pageNum, rect, qty}], index }
+
+function openPartPages(bucketIdx) {
+  const bucket = state.buckets[bucketIdx];
+  if (!bucket) return;
+  const entries = [];
+  for (const rec of state.pageRecords) {
+    for (const it of rec.items) {
+      if (it.bucketIdx !== bucketIdx) continue;
+      entries.push({ pageNum: rec.pageNum, rect: it.rect, qty: it.qty, thumb: rec.thumbDataUrl });
+    }
+  }
+  if (!entries.length) return;
+  partViewer = { bucketIdx, entries, index: 0 };
+
+  partSheetThumb.src = bucket.thumbUrl;
+  const totalQty = entries.reduce((s, e) => s + (e.qty || 0), 0);
+  partSheetTitle.textContent = `${totalQty} шт. на ${entries.length} ${plural(entries.length, "странице", "страницах", "страницах")}`;
+  partSheetPagelist.innerHTML = "";
+  entries.forEach((e, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "part-page-chip";
+    b.textContent = e.pageNum;
+    b.addEventListener("click", () => showPartPage(i));
+    partSheetPagelist.appendChild(b);
+  });
+  partOverlay.hidden = false;
+  showPartPage(0);
+}
+
+function plural(n, one, few, many) {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+
+function showPartPage(index) {
+  if (!partViewer) return;
+  partViewer.index = clamp(index, 0, partViewer.entries.length - 1);
+  const e = partViewer.entries[partViewer.index];
+  partPageImg.src = e.thumb;
+  partSheetPos.textContent = `Страница ${e.pageNum} — ${partViewer.index + 1} из ${partViewer.entries.length}`;
+  partPrevBtn.disabled = partViewer.index === 0;
+  partNextBtn.disabled = partViewer.index === partViewer.entries.length - 1;
+  Array.from(partSheetPagelist.children).forEach((c, i) =>
+    c.classList.toggle("active", i === partViewer.index));
+
+  positionPartHighlight();
+}
+
+// The page is drawn with object-fit:contain, so on a container whose shape
+// doesn't match the page there are letterbox bars and the image occupies only
+// part of the box. Percentages against the container would put the outline in
+// the wrong place (badly so on a phone, where the bars are large), so measure
+// where the image actually landed and place the outline in real pixels.
+function positionPartHighlight() {
+  if (!partViewer) return;
+  const e = partViewer.entries[partViewer.index];
+  if (!e.rect || !partPageImg.naturalWidth || !partPageImg.clientWidth) {
+    partHighlight.hidden = true; // no recorded position (older session), or not laid out yet
+    return;
+  }
+  const boxW = partPageImg.clientWidth, boxH = partPageImg.clientHeight;
+  const natRatio = partPageImg.naturalWidth / partPageImg.naturalHeight;
+  let drawW, drawH;
+  if (boxW / boxH > natRatio) { drawH = boxH; drawW = boxH * natRatio; }
+  else { drawW = boxW; drawH = boxW / natRatio; }
+  const offX = partPageImg.offsetLeft + (boxW - drawW) / 2;
+  const offY = partPageImg.offsetTop + (boxH - drawH) / 2;
+  partHighlight.style.left = `${offX + e.rect.x * drawW}px`;
+  partHighlight.style.top = `${offY + e.rect.y * drawH}px`;
+  partHighlight.style.width = `${e.rect.w * drawW}px`;
+  partHighlight.style.height = `${e.rect.h * drawH}px`;
+  partHighlight.hidden = false;
+}
+
+partPageImg.addEventListener("load", positionPartHighlight);
+window.addEventListener("resize", positionPartHighlight);
+
+function closePartPages() {
+  partOverlay.hidden = true;
+  partPageImg.src = "";
+  partViewer = null;
+}
+
+partPrevBtn.addEventListener("click", () => showPartPage(partViewer.index - 1));
+partNextBtn.addEventListener("click", () => showPartPage(partViewer.index + 1));
+partSheetClose.addEventListener("click", closePartPages);
+partOverlay.addEventListener("click", (e) => { if (e.target === partOverlay) closePartPages(); });
+// tapping the page image hands off to the existing full-screen zoom
+partSheetPage.addEventListener("click", () => {
+  if (!partViewer) return;
+  const e = partViewer.entries[partViewer.index];
+  const idx = state.pageRecords.findIndex((r) => r.pageNum === e.pageNum);
+  if (idx >= 0) { state.stepIndex = idx; openZoom(); }
+});
+document.addEventListener("keydown", (e) => {
+  if (partOverlay.hidden || !partViewer) return;
+  if (e.key === "Escape") { e.preventDefault(); closePartPages(); }
+  if (e.key === "ArrowLeft") { e.preventDefault(); showPartPage(partViewer.index - 1); }
+  if (e.key === "ArrowRight") { e.preventDefault(); showPartPage(partViewer.index + 1); }
+});
+
 function summarizePages(pages) {
-  if (pages.length <= 6) return pages.join(", ");
-  return `${pages[0]}…${pages[pages.length - 1]} (${pages.length} стр.)`;
+  if (pages.length <= 8) return pages.join(", ");
+  // never hide which pages they are behind an ellipsis - the whole list is
+  // what makes a part checkable; just keep the card from growing unbounded
+  return `${pages.slice(0, 7).join(", ")} +${pages.length - 7}`;
 }
 
 // Shared by the overview list and both step-mode lists: renders either a
@@ -1721,12 +1961,31 @@ function initLanBanner() {
 
 async function showQr() {
   await loadQrLib();
+  // The QR always encodes the address this page is actually served on, so
+  // scanning it is guaranteed to work right now.
   const url = location.href;
   const qr = window.qrcode(0, "M");
   qr.addData(url);
   qr.make();
   qrCanvasHolder.innerHTML = qr.createSvgTag(6, 8);
   qrUrl.textContent = url;
+
+  // ...but that address contains a router-assigned IP, which changes between
+  // sessions and silently breaks a link saved on the phone (exactly how this
+  // "doesn't open on my phone" turns up). Offer the mDNS name to bookmark.
+  qrStable.hidden = true;
+  try {
+    const res = await fetch("/api/info", { cache: "no-store" });
+    if (res.ok) {
+      const info = await res.json();
+      if (info.stableHost && !location.host.startsWith(info.stableHost)) {
+        qrStable.innerHTML = `Постоянный адрес (не меняется — можно сохранить в закладки на телефоне):<br><b>http://${escapeHtml(info.stableHost)}:${info.port}/</b>`;
+        qrStable.hidden = false;
+      }
+    }
+  } catch (e) {
+    // plain static hosting - no such endpoint, just show the QR
+  }
   qrOverlay.hidden = false;
 }
 

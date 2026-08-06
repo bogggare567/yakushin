@@ -127,12 +127,36 @@
   </div>
 </div>
 
+<div class="part-overlay" id="part-overlay" hidden>
+  <div class="part-sheet">
+    <div class="part-sheet-head">
+      <img id="part-sheet-thumb" alt="деталь" />
+      <div class="part-sheet-meta">
+        <div class="part-sheet-title" id="part-sheet-title"></div>
+        <div class="part-sheet-pagelist" id="part-sheet-pagelist"></div>
+      </div>
+      <button class="part-sheet-close" id="part-sheet-close" aria-label="Закрыть">✕</button>
+    </div>
+    <div class="part-sheet-nav">
+      <button id="part-prev" aria-label="Предыдущая страница">←</button>
+      <div class="part-sheet-pos" id="part-sheet-pos"></div>
+      <button id="part-next" aria-label="Следующая страница">→</button>
+    </div>
+    <div class="part-sheet-page" id="part-sheet-page">
+      <img id="part-page-img" alt="Страница инструкции" />
+      <div class="part-highlight" id="part-highlight" hidden></div>
+    </div>
+    <div class="part-sheet-hint">Рамкой отмечено, где программа увидела эту деталь. Нажмите на страницу, чтобы открыть её крупнее.</div>
+  </div>
+</div>
+
 <div class="qr-overlay" id="qr-overlay" hidden>
   <div class="qr-card">
     <h3>Открыть на телефоне</h3>
     <p>Отсканируйте камерой телефона (тот же Wi-Fi)</p>
     <div id="qr-canvas-holder"></div>
     <div class="qr-url" id="qr-url"></div>
+    <div class="qr-stable" id="qr-stable" hidden></div>
     <button id="qr-close">Закрыть</button>
   </div>
 </div>

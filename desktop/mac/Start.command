@@ -39,11 +39,19 @@ if ! kill -0 $SERVER_PID 2>/dev/null; then
   exit 0
 fi
 
+HOSTNAME_LOCAL="$(scutil --get LocalHostName 2>/dev/null)"
+
 echo ""
 echo "=================================================================="
 echo "  Открой на телефоне (в этой же Wi-Fi сети):"
 echo ""
 echo "  http://$IP:$PORT/"
+if [ -n "$HOSTNAME_LOCAL" ]; then
+  echo ""
+  echo "  Постоянный адрес (НЕ меняется - его можно сохранить в закладки,"
+  echo "  адрес выше зависит от роутера и со временем перестаёт работать):"
+  echo "  http://$HOSTNAME_LOCAL.local:$PORT/"
+fi
 echo ""
 echo "  На сайте есть кнопка «Показать QR» - можно отсканировать камерой."
 echo "  Оба устройства смогут делиться страницей и файлом инструкции."
