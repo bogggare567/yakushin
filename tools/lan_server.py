@@ -34,6 +34,17 @@ PDF_STORE = {"version": 0, "bytes": None, "name": None}
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    def end_headers(self):
+        # SimpleHTTPRequestHandler sends no Cache-Control at all, so browsers
+        # fall back to heuristic caching and happily keep serving a stale
+        # app.js/style.css after an update. That produces a half-updated app -
+        # new markup with old styling - which looks like random breakage
+        # (unstyled blue buttons, dialogs rendering as plain page content)
+        # rather than a caching problem. Always revalidate; Last-Modified
+        # still lets unchanged files come back as a cheap 304.
+        self.send_header("Cache-Control", "no-cache, must-revalidate")
+        super().end_headers()
+
     def _send_json(self, obj, code=200):
         body = json.dumps(obj).encode("utf-8")
         self.send_response(code)

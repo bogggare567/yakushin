@@ -1,7 +1,7 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
 pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
 
-const APP_VERSION = "1.5.0";
+const APP_VERSION = "1.5.1";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -1312,10 +1312,15 @@ function makePartCard(bucket, qty, unsure, pages, bucketIdx) {
   const card = document.createElement("div");
   card.className = "part-card" + (state.collected.has(bucketIdx) ? " collected" : "");
   const pagesArr = pages.slice().sort((x, y) => x - y);
+  // the check sits in the count row, not floating over the part picture -
+  // the picture is the thing you're actually reading, and a badge on top of
+  // every single card is just noise
   card.innerHTML = `
-    <button type="button" class="part-check" aria-label="Отметить как собранную" title="Отметить как собранную">✓</button>
     <img src="${bucket.thumbUrl}" alt="деталь" loading="lazy" />
-    <div class="part-qty ${unsure ? "unsure" : ""}">×${qty}${unsure ? " ?" : ""}</div>
+    <div class="part-row">
+      <button type="button" class="part-check" aria-label="Отметить как собранную" title="Отметить как собранную">✓</button>
+      <div class="part-qty ${unsure ? "unsure" : ""}">×${qty}${unsure ? " ?" : ""}</div>
+    </div>
     <div class="part-pages">стр. ${summarizePages(pagesArr)}</div>
   `;
   card.title = `Открыть страницы, где встречается эта деталь: ${pagesArr.join(", ")}`;
