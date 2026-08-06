@@ -23,3 +23,7 @@ venv/
 # Editor
 .vscode/
 .idea/
+
+# Throwaway harnesses generated while debugging in a real browser.
+/webapp/_selftest.html
+/webapp/_preview_pages/

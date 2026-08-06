@@ -1,7 +1,21 @@
 /* global pdfjsLib, GLYPH_TEMPLATES, GLYPH_W, GLYPH_H */
-pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@3.11.174/build/pdf.worker.min.js";
+// pdf.js is bundled locally rather than pulled from a CDN: the app is meant to
+// run on a laptop with no internet (and the worker being same-origin avoids the
+// blob/importScripts dance browsers need for a cross-origin worker).
+pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 
-const APP_VERSION = "1.5.1";
+// Rendering fonts through the FontFace API is pathologically slow in Safari:
+// measured on this very instruction file, the FIRST page took 15s, 33s, and in
+// one run never finished at all, while every later page took ~30ms. With
+// disableFontFace pdf.js draws glyphs as plain vector paths instead, and the
+// same first page renders in 49ms. Chrome is fast either way.
+// Checked that this does not cost accuracy, which matters because quantities
+// are read straight off these rendered pixels: over 20 pages it finds exactly
+// the same 33 items as the reference rasteriser, with 0 unsure readings, and
+// page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
+const PDF_LOAD_OPTS = { disableFontFace: true };
+
+const APP_VERSION = "1.6.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -187,7 +201,7 @@ async function onPdfSelected(e) {
   const buf = await file.arrayBuffer();
   if (syncAvailable) pushSyncedPdf(file, buf.slice(0)); // fire-and-forget; pdfjs may transfer buf below
   currentPdfBytesForSession = buf.slice(0); // kept until first analysis, then persisted
-  pdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+  pdfDoc = await pdfjsLib.getDocument({ data: buf, ...PDF_LOAD_OPTS }).promise;
 
   fileInfo.textContent = `${file.name} — ${pdfDoc.numPages} стр.`;
   pageTotalLabel.textContent = `всего страниц: ${pdfDoc.numPages}`;
@@ -1924,7 +1938,7 @@ async function resumeSession(id) {
   currentPdfFilePersisted = true;
   currentPdfBytesForSession = null;
   fileInfo.textContent = `Открываю «${meta.pdfName}»…`;
-  pdfDoc = await pdfjsLib.getDocument({ data: bytes }).promise;
+  pdfDoc = await pdfjsLib.getDocument({ data: bytes, ...PDF_LOAD_OPTS }).promise;
   fileInfo.textContent = `${meta.pdfName} — ${pdfDoc.numPages} стр.`;
   pageTotalLabel.textContent = `всего страниц: ${pdfDoc.numPages}`;
   pageFrom.value = meta.from;
@@ -2129,7 +2143,7 @@ async function adoptSyncedPdf(meta, remoteState) {
     if (myToken !== activeRunToken) return; // abandoned locally (e.g. "+ Новая сессия") while fetching
     // pdfjs may transfer/detach buf, so grab the bytes we need to keep first
     const bytesForSession = buf.slice(0);
-    const newPdfDoc = await pdfjsLib.getDocument({ data: buf }).promise;
+    const newPdfDoc = await pdfjsLib.getDocument({ data: buf, ...PDF_LOAD_OPTS }).promise;
     if (myToken !== activeRunToken) return; // abandoned locally while parsing
 
     // A synced PDF is a different file from whatever session (if any) happens
