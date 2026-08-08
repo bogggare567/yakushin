@@ -27,3 +27,11 @@ venv/
 # Throwaway harnesses generated while debugging in a real browser.
 /webapp/_selftest.html
 /webapp/_preview_pages/
+
+# Model training artefacts: the dataset rebuilds from the PDFs in a couple of
+# minutes and the venv installs with one command, so neither belongs in git.
+/tools/model/dataset*.npz
+/tools/model/*.log
+/tools/model/model_buckets*.png
+/tools/model/model_prev_*.pt
+/tools/model/model_candidate.pt

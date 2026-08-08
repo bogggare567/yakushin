@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "1.7.0";
+const APP_VERSION = "2.0.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -234,6 +234,7 @@ async function runAnalysis() {
   viewControls.hidden = true;
   stepModeEl.hidden = true;
   setProgress(0, "Подготовка…");
+  await loadPartModel();   // no-op after the first call; falls back silently if absent
   state.collected.clear();
   if (pendingResumeCollected) {
     for (const idx of pendingResumeCollected) state.collected.add(idx);
@@ -875,7 +876,7 @@ function computeSignature(canvas) {
     const dr = Math.abs(data[i] - BOX_BG[0]), dg = Math.abs(data[i + 1] - BOX_BG[1]), db = Math.abs(data[i + 2] - BOX_BG[2]);
     fgGrid[p] = Math.max(dr, dg, db) > FG_DIFF_THRESHOLD ? 1 : 0;
   }
-  return { grid, fgGrid, avgColor };
+  return { grid, fgGrid, avgColor, embedding: partEmbedding(canvas) };
 }
 
 function modeSeekColor(bins, fgPixels) {
@@ -934,20 +935,52 @@ function colorDist(a, b) {
   return Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2]));
 }
 
+// How two icons are judged to be the same part.
+//
+// When the model is loaded this is simply the distance between the two
+// embeddings. Measured on pages the model never trained on (tools/model/qc.py),
+// against the hand-written rules below which score 7.76% / 1.92%:
+//
+//     tolerance   one part split up   different parts fused
+//        0.34          0.66%                 0.47%
+//        0.20          2.23%                 0.00%
+//
+// 0.20 is the shipped setting even though 0.34 looks better on paper: the
+// certain-pair test can only be built from parts that share a callout box, and
+// a smooth tile rarely shares a box with the studded plate of the same
+// footprint - so the loose setting scored well while visibly fusing exactly
+// that pair. Erring towards splitting is also the safer mistake: a fused row
+// hides a part you then never look for, while a duplicated row is only untidy.
+//
+// The rules below stay as the fallback for when the model file is missing (a
+// stale cache, someone serving webapp/ without vendor/), so the app degrades
+// to its old behaviour instead of breaking.
+const EMBED_MATCH_TOL = 0.20;
+
 // A near-identical shape is strong evidence on its own, so allow the dominant
 // colour to drift further in that case: the same part redrawn at another size
 // shifts its measured colour (different pixels get averaged), and a flat 24
-// cutoff was tearing single parts into several rows - measured on the real
-// file, identical parts sat 25-31 apart in colour while matching to within 10
-// on shape.
+// cutoff was tearing single parts into several rows.
+function legacySamePart(b, sig) {
+  const cd = colorDist(b.avgColor, sig.avgColor);
+  if (cd > COLOR_TOL_STRONG_SHAPE) return false;
+  const gd = gridDist(b, sig);
+  if (gd > SIG_DIST_TOL) return false;
+  return cd <= (gd <= STRONG_SHAPE_DIST ? COLOR_TOL_STRONG_SHAPE : COLOR_TOL);
+}
+
 function findBucket(buckets, sig) {
-  return buckets.find((b) => {
-    const cd = colorDist(b.avgColor, sig.avgColor);
-    if (cd > COLOR_TOL_STRONG_SHAPE) return false;
-    const gd = gridDist(b, sig);
-    if (gd > SIG_DIST_TOL) return false;
-    return cd <= (gd <= STRONG_SHAPE_DIST ? COLOR_TOL_STRONG_SHAPE : COLOR_TOL);
-  });
+  if (sig.embedding) {
+    // nearest bucket within tolerance, not merely the first one that passes
+    let best = null, bestD = Infinity;
+    for (const b of buckets) {
+      if (!b.embedding) continue;
+      const d = embeddingDistance(b.embedding, sig.embedding);
+      if (d < bestD) { bestD = d; best = b; }
+    }
+    return bestD <= EMBED_MATCH_TOL ? best : undefined;
+  }
+  return buckets.find((b) => legacySamePart(b, sig));
 }
 
 function addToBuckets(buckets, item, pageNum) {
@@ -960,6 +993,7 @@ function addToBuckets(buckets, item, pageNum) {
       grid: sig.grid,
       fgGrid: sig.fgGrid,
       avgColor: sig.avgColor,
+      embedding: sig.embedding,
       count: 0,
       unsure: false,
       pages: new Set(),
@@ -1934,6 +1968,7 @@ qrOverlay.addEventListener("click", (e) => { if (e.target === qrOverlay) qrOverl
 
 initLanBanner();
 renderLibrary();
+loadPartModel();   // fetch the part-recognition model in the background
 
 // ---------- update check ----------
 
