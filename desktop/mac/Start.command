@@ -21,20 +21,43 @@ if [ -z "$IP" ]; then
   exit 0
 fi
 
-# Reuse an already-running server on this port instead of failing with
-# "address already in use" (e.g. a previous run still open in another tab).
-if curl -s -o /dev/null -m 1 "http://127.0.0.1:$PORT/"; then
-  echo "Сервер уже запущен на порту $PORT - открываю страницу."
-  open "http://$IP:$PORT/"
+# Picking a port. A previous run can still be holding 8934 - sometimes alive
+# and usable, sometimes hung and answering nothing. Losing phone access
+# entirely just because one port is taken is the worst outcome, so: reuse one
+# of our own servers if it actually answers, otherwise move to the next free
+# port rather than giving up.
+LAST_PORT=$((PORT + 10))
+
+for p in $(seq "$PORT" "$LAST_PORT"); do
+  if curl -s -m 2 "http://127.0.0.1:$p/api/info" 2>/dev/null | grep -q stableHost; then
+    echo "Сервер уже запущен на порту $p - открываю страницу."
+    open "http://$IP:$p/"
+    exit 0
+  fi
+done
+
+CHOSEN=""
+for p in $(seq "$PORT" "$LAST_PORT"); do
+  if ! lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1; then CHOSEN="$p"; break; fi
+done
+
+if [ -z "$CHOSEN" ]; then
+  echo "Все порты $PORT-$LAST_PORT заняты - открываю локально (без телефона)."
+  open "$DIR/webapp/index.html"
   exit 0
 fi
+
+if [ "$CHOSEN" != "$PORT" ]; then
+  echo "Порт $PORT занят другой программой - использую $CHOSEN."
+fi
+PORT="$CHOSEN"
 
 python3 "$DIR/tools/lan_server.py" "$PORT" "$DIR/webapp" &
 SERVER_PID=$!
 sleep 1
 
 if ! kill -0 $SERVER_PID 2>/dev/null; then
-  echo "Не удалось поднять сервер на порту $PORT (занят чем-то другим?) - открываю локально."
+  echo "Не удалось поднять сервер на порту $PORT - открываю локально."
   open "$DIR/webapp/index.html"
   exit 0
 fi

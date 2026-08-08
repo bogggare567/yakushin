@@ -27,13 +27,34 @@ if "%IP%"=="" (
     exit /b 0
 )
 
-REM Reuse an already-running server on this port instead of erroring out.
-curl -s -o NUL -m 1 "http://127.0.0.1:%PORT%/"
-if %errorlevel%==0 (
-    echo Сервер уже запущен на порту %PORT% - открываю страницу.
-    start "" "http://%IP%:%PORT%/"
+REM A previous run may still hold the port - alive and usable, or hung and
+REM answering nothing. Reuse one of our own servers if it really answers,
+REM otherwise move to the next free port instead of losing phone access.
+set /a LAST_PORT=%PORT%+10
+for /l %%p in (%PORT%,1,%LAST_PORT%) do (
+    curl -s -m 2 "http://127.0.0.1:%%p/api/info" 2>NUL | findstr /c:"stableHost" >NUL
+    if !errorlevel!==0 (
+        echo Сервер уже запущен на порту %%p - открываю страницу.
+        start "" "http://!IP!:%%p/"
+        exit /b 0
+    )
+)
+
+set CHOSEN=
+for /l %%p in (%PORT%,1,%LAST_PORT%) do (
+    if not defined CHOSEN (
+        netstat -an | findstr /c:":%%p " | findstr /i "LISTENING" >NUL
+        if !errorlevel! neq 0 set CHOSEN=%%p
+    )
+)
+if not defined CHOSEN (
+    echo Все порты %PORT%-%LAST_PORT% заняты - открываю локально ^(без телефона^).
+    start "" "%DIR%\webapp\index.html"
+    pause
     exit /b 0
 )
+if not "!CHOSEN!"=="%PORT%" echo Порт %PORT% занят другой программой - использую !CHOSEN!.
+set PORT=!CHOSEN!
 
 echo.
 echo ==================================================================
