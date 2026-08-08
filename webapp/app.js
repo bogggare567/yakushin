@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "1.6.1";
+const APP_VERSION = "1.7.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -33,6 +33,8 @@ const SIG_MARGIN = 2; // border reserved inside SIG_SIZE so small shifts stay in
 const SIG_MAX_SHIFT = 2; // px of shift tried in each direction when comparing two signatures
 const SIG_DIST_TOL = 40; // max mean color difference (0-255 scale) to call two icons the same part
 const COLOR_TOL = 24;
+const COLOR_TOL_STRONG_SHAPE = 40; // colour may drift this far when the shape matches almost exactly
+const STRONG_SHAPE_DIST = 20; // grid distance below which a shape match counts as "almost exact"
 const GLYPH_MAX_DIST_FRAC = 0.22; // fraction of bits mismatched above which a glyph match is untrusted
 
 const pdfInput = document.getElementById("pdf-input");
@@ -799,7 +801,6 @@ function autocropCanvas(canvas) {
 const COLOR_MODE_BIN = 32; // quantization step for finding the icon's dominant color
 const COLOR_MODE_AMBIGUOUS_SHARE = 0.10; // below this, no single bin is trustworthy on its own
 const COLOR_MODE_MERGE_RADIUS = 45; // chebyshev color-distance (0-255) used by the mode-seek fallback
-const TEXTURE_TOL = 0.03; // max surface-texture difference for two icons to be the same part
 
 function computeSignature(canvas) {
   const cw = canvas.width, ch = canvas.height;
@@ -874,95 +875,7 @@ function computeSignature(canvas) {
     const dr = Math.abs(data[i] - BOX_BG[0]), dg = Math.abs(data[i + 1] - BOX_BG[1]), db = Math.abs(data[i + 2] - BOX_BG[2]);
     fgGrid[p] = Math.max(dr, dg, db) > FG_DIFF_THRESHOLD ? 1 : 0;
   }
-  return { grid, fgGrid, avgColor, texture: surfaceTexture(odata, cw, ch) };
-}
-
-// A studded plate and a smooth tile with the same footprint and colour differ
-// in exactly one thing: surface texture. At the 14x14 signature resolution
-// that difference is far too subtle to register - measured over 450 real
-// icons, plate-vs-tile grid distances (16-42) sit *below* the distances
-// between the same part drawn at two different scales (up to 40), so no grid
-// resolution or tolerance can separate them; raising SIG_SIZE to 20/24/32 only
-// widened the overlap. Measure the texture directly instead: high-frequency
-// energy inside the part, divided by the part's own contrast range (so a black
-// part isn't penalised for being dark) with a blur radius proportional to the
-// icon (so the render scale doesn't matter). LEGO callout boxes shrink their
-// icons when a box holds more items, which is what made scale the dominant
-// noise source in the first place.
-// Validated on pages 1-150 of the real file: splits 5/5 known plate-vs-tile
-// merges, with zero same-part buckets fragmenting.
-function surfaceTexture(odata, cw, ch) {
-  const n = cw * ch;
-  const lum = new Float64Array(n);
-  let fg = new Uint8Array(n);
-  let fgCount = 0;
-  for (let p = 0, i = 0; p < n; p++, i += 4) {
-    lum[p] = (odata[i] + odata[i + 1] + odata[i + 2]) / 3;
-    const dr = Math.abs(odata[i] - BOX_BG[0]);
-    const dg = Math.abs(odata[i + 1] - BOX_BG[1]);
-    const db = Math.abs(odata[i + 2] - BOX_BG[2]);
-    if (Math.max(dr, dg, db) > FG_DIFF_THRESHOLD) { fg[p] = 1; fgCount++; }
-  }
-  if (fgCount < 40) return 0;
-
-  // Pull the measurement away from the part's outline, which is a hard edge on
-  // every part and would otherwise swamp the surface detail we're after.
-  const erode = (src) => {
-    const out = new Uint8Array(n);
-    for (let y = 0; y < ch; y++) {
-      for (let x = 0; x < cw; x++) {
-        if (!src[y * cw + x]) continue;
-        let all = 1;
-        for (let dy = -1; dy <= 1 && all; dy++) {
-          for (let dx = -1; dx <= 1; dx++) {
-            const ny = y + dy, nx = x + dx;
-            if (ny < 0 || nx < 0 || ny >= ch || nx >= cw || !src[ny * cw + nx]) { all = 0; break; }
-          }
-        }
-        out[y * cw + x] = all;
-      }
-    }
-    return out;
-  };
-  let inside = erode(erode(fg));
-  let insideCount = 0;
-  for (let p = 0; p < n; p++) insideCount += inside[p];
-  if (insideCount < 20) { inside = fg; insideCount = fgCount; }
-
-  // integral image -> O(1) local mean at any radius, so a big icon is no slower
-  const ii = new Float64Array((cw + 1) * (ch + 1));
-  for (let y = 0; y < ch; y++) {
-    let rowSum = 0;
-    for (let x = 0; x < cw; x++) {
-      rowSum += lum[y * cw + x];
-      ii[(y + 1) * (cw + 1) + (x + 1)] = ii[y * (cw + 1) + (x + 1)] + rowSum;
-    }
-  }
-  const r = Math.max(1, Math.round(Math.max(1, Math.min(cw, ch) / 12)));
-  let sum = 0, sumSq = 0;
-  for (let y = 0; y < ch; y++) {
-    const y0 = Math.max(0, y - r), y1 = Math.min(ch, y + r + 1);
-    for (let x = 0; x < cw; x++) {
-      if (!inside[y * cw + x]) continue;
-      const x0 = Math.max(0, x - r), x1 = Math.min(cw, x + r + 1);
-      const total = ii[y1 * (cw + 1) + x1] - ii[y0 * (cw + 1) + x1]
-                  - ii[y1 * (cw + 1) + x0] + ii[y0 * (cw + 1) + x0];
-      const hp = lum[y * cw + x] - total / ((y1 - y0) * (x1 - x0));
-      sum += hp; sumSq += hp * hp;
-    }
-  }
-  const mean = sum / insideCount;
-  const std = Math.sqrt(Math.max(0, sumSq / insideCount - mean * mean));
-
-  // the part's own light-to-dark range, via a histogram (5th..95th percentile)
-  const hist = new Uint32Array(256);
-  for (let p = 0; p < n; p++) if (fg[p]) hist[Math.min(255, Math.max(0, Math.round(lum[p])))]++;
-  const pct = (frac) => {
-    let target = frac * fgCount, acc = 0;
-    for (let v = 0; v < 256; v++) { acc += hist[v]; if (acc >= target) return v; }
-    return 255;
-  };
-  return std / Math.max(pct(0.95) - pct(0.05), 8);
+  return { grid, fgGrid, avgColor };
 }
 
 function modeSeekColor(bins, fgPixels) {
@@ -1021,12 +934,20 @@ function colorDist(a, b) {
   return Math.max(Math.abs(a[0] - b[0]), Math.abs(a[1] - b[1]), Math.abs(a[2] - b[2]));
 }
 
+// A near-identical shape is strong evidence on its own, so allow the dominant
+// colour to drift further in that case: the same part redrawn at another size
+// shifts its measured colour (different pixels get averaged), and a flat 24
+// cutoff was tearing single parts into several rows - measured on the real
+// file, identical parts sat 25-31 apart in colour while matching to within 10
+// on shape.
 function findBucket(buckets, sig) {
-  return buckets.find(
-    (b) => colorDist(b.avgColor, sig.avgColor) <= COLOR_TOL
-      && Math.abs(b.texture - sig.texture) <= TEXTURE_TOL
-      && gridDist(b, sig) <= SIG_DIST_TOL
-  );
+  return buckets.find((b) => {
+    const cd = colorDist(b.avgColor, sig.avgColor);
+    if (cd > COLOR_TOL_STRONG_SHAPE) return false;
+    const gd = gridDist(b, sig);
+    if (gd > SIG_DIST_TOL) return false;
+    return cd <= (gd <= STRONG_SHAPE_DIST ? COLOR_TOL_STRONG_SHAPE : COLOR_TOL);
+  });
 }
 
 function addToBuckets(buckets, item, pageNum) {
@@ -1039,7 +960,6 @@ function addToBuckets(buckets, item, pageNum) {
       grid: sig.grid,
       fgGrid: sig.fgGrid,
       avgColor: sig.avgColor,
-      texture: sig.texture,
       count: 0,
       unsure: false,
       pages: new Set(),
