@@ -39,6 +39,7 @@ const STUD_MIN_AREA = 20000;   // below this there is too little to correlate
 const STUD_CROP = 256;         // the lattice is read from a centre crop this big
 const STUD_TOP_PEAKS = 8;      // candidate repeat vectors tried per icon
 const STUD_STRONG_PEAK = 0.20; // a repeat vector must be this much of the best peak
+const STUD_SQUARE_TOL = 0.80;  // the two lattice vectors must be near equal in length
 const STUD_SURE_ERR = 0.08;    // a lone reading is only trusted this close to whole
 
 // Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
@@ -255,6 +256,12 @@ function studLattice(prep) {
       const na = Math.hypot(a[0], a[1]), nb = Math.hypot(b[0], b[1]);
       if (cross / (na * nb + 1e-9) <= 0.3) continue;
       const [u, v] = studReduce(a, b);
+      // Studs sit on a SQUARE grid, and this projection maps a square to a
+      // rhombus — equal sides. Real lattices measure between 0.87 and 1.0 over
+      // a whole booklet; the one studless part that was still getting a size,
+      // a curved slope whose ridges repeat in one direction only, sits at 0.36.
+      const lu = Math.hypot(u[0], u[1]), lv = Math.hypot(v[0], v[1]);
+      if (Math.min(lu, lv) / Math.max(lu, lv, 1e-9) < STUD_SQUARE_TOL) continue;
       const key = `${Math.round(u[0])},${Math.round(u[1])},${Math.round(v[0])},${Math.round(v[1])}`;
       if (seen.has(key)) continue;
       seen.add(key);

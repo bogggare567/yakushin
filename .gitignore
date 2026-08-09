@@ -40,6 +40,10 @@ venv/
 /tools/model/.icons_*.pkl
 /tools/model/.boxicons_*.pkl
 /tools/model/studs*.png
+/tools/model/*_sizes_*.png
+/tools/model/*_silent.png
+/tools/model/page*.png
+/tools/model/row*.png
 /tools/model/audit*_merges.png
 /tools/model/audit*_dupes.png
 /tools/model/*_metrics.json

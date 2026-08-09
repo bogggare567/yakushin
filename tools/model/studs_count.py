@@ -40,6 +40,7 @@ MIN_LAG = 8           # a repeat shorter than this is antialiasing, not studs
 FIT_TOL = 0.18        # how far from whole a count may land
 MIN_PIXELS = 200      # smaller than this and there is nothing to correlate
 STRONG_PEAK = 0.20    # a repeat vector must be this fraction of the best peak
+SQUARE_TOL = 0.80     # the two lattice vectors must be near equal in length
 TOP_PEAKS = 8         # candidate repeat vectors considered per icon
 
 # Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
@@ -160,6 +161,15 @@ def lattice(icon, lag=120):
             if cross / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9) <= 0.3:
                 continue
             u, v = reduce_basis(a, b)
+            # Studs sit on a SQUARE grid, and this projection maps a square to
+            # a rhombus — equal sides. Measured over the whole booklet, real
+            # lattices come out between 0.87 and 1.0; the one part that was
+            # getting a size with no studs at all, a curved slope whose ridges
+            # repeat in one direction only, sits at 0.36. This is a property of
+            # the drawing rather than a tuned threshold.
+            lu, lv = np.linalg.norm(u), np.linalg.norm(v)
+            if min(lu, lv) / max(lu, lv, 1e-9) < SQUARE_TOL:
+                continue
             key = (round(u[0]), round(u[1]), round(v[0]), round(v[1]))
             if key in seen:
                 continue
