@@ -39,7 +39,8 @@ MAX_STUDS = 24
 MIN_LAG = 8           # a repeat shorter than this is antialiasing, not studs
 FIT_TOL = 0.18        # how far from whole a count may land
 MIN_PIXELS = 200      # smaller than this and there is nothing to correlate
-TOP_PEAKS = 6         # candidate repeat vectors considered per icon
+STRONG_PEAK = 0.20    # a repeat vector must be this fraction of the best peak
+TOP_PEAKS = 8         # candidate repeat vectors considered per icon
 
 # Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
 # 1x8, not a discovery, and this number exists to be checked against — a wrong
@@ -89,19 +90,55 @@ def lattice(icon, lag=120):
     ys, xs = np.nonzero(peak)
     if len(ys) < 2:
         return None
-    order = sorted(zip(-win[ys, xs], yy[ys, xs], xx[ys, xs]))[:TOP_PEAKS]
-    vecs = [np.array([float(vx), float(vy)]) for _, vy, vx in order]
-    pairs = []
+    vals = win[ys, xs]
+    # only peaks that are actually strong: a stud has its own rim and top, and
+    # those make weak bumps at half the spacing which are not repeats of the
+    # lattice at all
+    keep = vals >= STRONG_PEAK * vals.max()
+    ys, xs, vals = ys[keep], xs[keep], vals[keep]
+    if len(ys) < 2:
+        return None
+    order = np.argsort(-vals)[:TOP_PEAKS]
+    vecs = [np.array([float(xx[ys[i], xs[i]]), float(yy[ys[i], xs[i]])]) for i in order]
+    out, seen = [], set()
     for i in range(len(vecs)):
         for j in range(i + 1, len(vecs)):
             a, b = vecs[i], vecs[j]
             cross = abs(a[0] * b[1] - a[1] * b[0])
-            if cross / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9) > 0.45:
-                pairs.append((cross, a, b))
-    # Smallest cell first: twice a lattice vector is also a repeat vector, so a
-    # doubled pair fits just as well and reports exactly half the studs.
-    pairs.sort(key=lambda t: t[0])
-    return [(a, b) for _, a, b in pairs] or None
+            if cross / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-9) <= 0.3:
+                continue
+            u, v = reduce_basis(a, b)
+            key = (round(u[0]), round(u[1]), round(v[0]), round(v[1]))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((abs(u[0] * v[1] - u[1] * v[0]), u, v))
+    # smallest cell first — safe now that every candidate is reduced, so a
+    # diagonal pair can no longer masquerade as a different lattice of the
+    # same area
+    out.sort(key=lambda t: t[0])
+    return [(u, v) for _, u, v in out] or None
+
+
+def reduce_basis(u, v):
+    """The two shortest vectors of the lattice these two span (Gauss reduction).
+
+    This is what fixes the counts coming out as (W+L, L). A diagonal of the
+    lattice cell is a perfectly good repeat vector, and the cell it spans with
+    one of the sides has exactly the same area as the real cell — so "prefer the
+    smallest cell" could not tell them apart and a 2x4 brick was reported 6x2.
+    Reduction removes the choice: any basis of a lattice, diagonal or not,
+    reduces to the same shortest pair.
+    """
+    u, v = np.array(u, float), np.array(v, float)
+    for _ in range(50):
+        if np.dot(u, u) > np.dot(v, v):
+            u, v = v, u
+        m = round(float(np.dot(u, v) / max(np.dot(u, u), 1e-9)))
+        if m == 0:
+            break
+        v = v - m * u
+    return u, v
 
 
 def face_corners(icon):
