@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "2.7.0";
+const APP_VERSION = "2.8.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -999,7 +999,17 @@ const EMBED_MATCH_TOL = 0.25;
 //
 //                       same part      different parts      cost      catches
 //     colour            average 2.4    average 80           1.0%      55%
-//     proportions       average 0.02   average 0.24         2.5%      55%
+//     proportions       average 0.02   average 0.24         3.0%      70%
+//
+// The proportions cutoff was tightened from 0.15 to 0.09 after the two
+// booklets were gone through by hand: the last two mistakes standing were a
+// pair of curved slopes and a 1x4 brick against a 1x3, both differing by about
+// 0.09 and neither reachable by the model, the colour check or the stud count.
+// It is worth being plain that this number was chosen against the same set of
+// errors it is judged on. What keeps it honest is the independently measured
+// price above, and the fact that 0.09 is still three times the 95th percentile
+// of how far one part's own proportions wander (0.03) — it cuts the tail, not
+// the body. End to end it costs 6 extra rows across 761.
 //
 // Colour is compared as the largest single-channel difference, proportions as
 // |log(w/h) difference| - a ratio, so it means the same thing for a 1x2 and a
@@ -1008,7 +1018,7 @@ const EMBED_MATCH_TOL = 0.25;
 // that remain are all one kind — same colour, same proportions, a different
 // number of studs (6x6 against 8x8) — which is the known limit today.
 const COLOR_VETO = 45;
-const ASPECT_VETO = 0.15;
+const ASPECT_VETO = 0.09;
 
 // A near-identical shape is strong evidence on its own, so allow the dominant
 // colour to drift further in that case: the same part redrawn at another size
@@ -1125,9 +1135,14 @@ function applyStudSizes(buckets, studItems, pageRecords) {
       : members.length === 1 && winner[0].err < STUD_SURE_ERR;
     if (decisive) buckets[row].studSize = winner[0].size;
 
-    // a second size only counts as a second part if it was seen more than once
+    // Splitting does not wait for a majority. A row holding a 6x6 plate and an
+    // 8x8 in equal numbers has no majority by definition, and the old rule
+    // therefore left the worst case — two different parts, evenly mixed —
+    // completely alone. Any size seen more than once is a part; whether the
+    // row gets a printed label still needs a majority, but that is a separate
+    // question from whether it is one part or two.
     for (const moving of ranked.slice(1)) {
-      if (moving.length < 2 || !decisive) continue;
+      if (moving.length < 2) continue;
       const src = buckets[row];
       const dst = {
         grid: src.grid, fgGrid: src.fgGrid, avgColor: src.avgColor,

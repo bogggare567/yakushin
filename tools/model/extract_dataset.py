@@ -41,6 +41,27 @@ def to_input(icon):
     return np.asarray(im, dtype=np.uint8), float(np.log(w / h))
 
 
+def slot_counts(doc, name):
+    """How many slots each box is cut into, at every scale.
+
+    A positive pair says "slot 3 of this box at scale 3.0 is the same part as
+    slot 3 at scale 1.9". That is only true if the box is cut the same way both
+    times. Audited over 977 boxes exactly one is not (audit_dataset.py), and one
+    mislabelled positive teaches the model that two unrelated parts are the same
+    — the worst lesson available — so the box is dropped rather than trusted.
+    """
+    counts = {}
+    for scale in SCALES:
+        per_box = {}
+        for page in range(doc.page_count):
+            for bi, si, _ in P.iter_page_icons(doc, page, scale):
+                per_box[(page, bi)] = per_box.get((page, bi), 0) + 1
+        for k, v in per_box.items():
+            counts.setdefault(k, {})[scale] = v
+    return {k for k, v in counts.items()
+            if len(v) == len(SCALES) and len(set(v.values())) == 1}
+
+
 def main():
     out_path = sys.argv[1]
     pdfs = sys.argv[2:]
@@ -53,9 +74,14 @@ def main():
         doc = fitz.open(pdf)
         name = os.path.basename(pdf)
         t0 = time.time()
+        consistent = slot_counts(doc, name)
+        print(f"  {name}: рамок с одинаковой нарезкой во всех масштабах: {len(consistent)}",
+              flush=True)
         for scale in SCALES:
             for page in range(doc.page_count):
                 for bi, si, icon in P.iter_page_icons(doc, page, scale):
+                    if (page, bi) not in consistent:
+                        continue
                     key = (name, page, bi, si)
                     gid = group_of.setdefault(key, len(group_of))
                     img, asp = to_input(icon)

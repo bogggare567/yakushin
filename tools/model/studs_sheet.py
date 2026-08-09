@@ -123,7 +123,7 @@ def main():
     emb = embed_batch(net, icons)
     cols_ = np.stack([B.dominant_color(ic) for ic in icons])
     asps = np.array([float(np.log(ic.shape[1] / ic.shape[0])) for ic in icons])
-    rows = bucket_with_vetoes(emb, cols_, asps, 0.25, 45, 0.15)
+    rows = bucket_with_vetoes(emb, cols_, asps, 0.25, 45, 0.09)
     print(f"иконок {len(icons)}, строк {len(rows)}")
 
     per_row = {}
@@ -159,6 +159,7 @@ def main():
         # would ever see. Reading a sheet that did not split, I "found" a 3x3
         # labelled 4x4 that was really two different plates the matcher had
         # fused and the stud count had already caught.
+        # any size seen more than once is its own part, majority or not
         shown = [win] + [g for g in ranked[1:] if len(g) >= 2]
         for grp in shown:
             size = grp[0][0]

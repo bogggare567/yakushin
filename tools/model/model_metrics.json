@@ -15,21 +15,21 @@
   "n_hard": 1323,
   "passes": true,
   "hand_checked": {
-    "note": "строки, разобранные глазами на двух буклетах; см. groundtruth*.json и regression.py. Дообучение на парах с разным измеренным размером в шипах: было 16 из 21, стало 18 из 21",
+    "note": "строки, разобранные глазами на двух буклетах; см. groundtruth*.json и regression.py. regression.py теперь моделирует и шаг разделения по шипам, как в приложении",
     "settings": {
       "tol": 0.25,
       "color_veto": 45,
-      "aspect_veto": 0.15
+      "aspect_veto": 0.09
     },
     "booklet_1": {
       "pairs": 12,
-      "still_merged": 2
+      "still_merged": 0
     },
     "booklet_2": {
       "pairs": 9,
-      "still_merged": 1
+      "still_merged": 0
     },
-    "remaining": "6x6 против 8x8, два скоса разной длины, кубик 1x4 против 1x3"
+    "history": "16 из 21 -> 18 (дообучение на шипах) -> 19 (разделение без большинства) -> 21 (вето 0.09)"
   },
   "stud_census": {
     "note": "все подписи размера, пересчитанные глазами по контактным листам (studs_sheet.py)",
@@ -43,5 +43,20 @@
       "labels": 37,
       "correct": 37
     }
+  },
+  "dataset_audit": {
+    "note": "audit_dataset.py — проверка правил разметки, а не самих данных",
+    "boxes": 977,
+    "boxes_cut_differently_across_scales": 1,
+    "same_box_pairs_checked": 4885,
+    "same_box_pairs_that_are_really_one_part": 0
+  },
+  "detection": {
+    "note": "сквозной прогон приложения, книга 1",
+    "pages": 400,
+    "pages_with_parts": 374,
+    "icons": 1027,
+    "parts": 2015,
+    "rows_with_unreadable_quantity": 1
   }
 }

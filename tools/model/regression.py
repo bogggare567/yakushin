@@ -16,8 +16,11 @@ import numpy as np
 import torch
 
 import baseline as B
+import studs_count as SC
 from audit import load_icons, embed_batch
 from model import IconEmbedder
+
+STUD_MIN_AREA = 20000   # matches webapp/studs.js
 
 
 def bucket_with_vetoes(emb, cols, asps, tol, color_veto, aspect_veto):
@@ -54,6 +57,8 @@ def main():
     ap.add_argument("--color", type=float, default=0.0, help="0 = без вето по цвету")
     ap.add_argument("--aspect", type=float, default=0.0, help="0 = без вето по пропорциям")
     ap.add_argument("--pages", type=int, default=400)
+    ap.add_argument("--no-studs", action="store_true",
+                    help="без шага разделения по шипам — чтобы видеть его вклад")
     args = ap.parse_args()
 
     truth = json.load(open(args.truth))
@@ -73,6 +78,32 @@ def main():
     asps = np.array([float(np.log(ic.shape[1] / ic.shape[0])) for ic in icons])
 
     rows = bucket_with_vetoes(emb, cols, asps, args.tol, args.color, args.aspect)
+
+    # The app does one more thing after matching, and leaving it out of this
+    # test was quietly overstating the errors: rows whose measured stud sizes
+    # disagree get split. That is a real part of the pipeline, so it belongs
+    # here — a harness that models less than the product measures the wrong
+    # thing.
+    if not args.no_studs:
+        extra = []
+        for row in rows:
+            sizes = {}
+            for i in row["idx"]:
+                if icons[i].shape[0] * icons[i].shape[1] < STUD_MIN_AREA:
+                    continue
+                m = SC.measure(icons[i])
+                if m:
+                    sizes.setdefault(m[0], []).append(i)
+            if len(sizes) < 2:
+                continue
+            ranked = sorted(sizes.values(), key=len, reverse=True)
+            for moving in ranked[1:]:
+                if len(moving) < 2:
+                    continue
+                row["idx"] = [i for i in row["idx"] if i not in set(moving)]
+                extra.append({"idx": list(moving)})
+        rows = rows + extra
+
     row_of = {}
     for r, row in enumerate(rows):
         for i in row["idx"]:
