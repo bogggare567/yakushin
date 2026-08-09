@@ -16,7 +16,7 @@ Two sheets:
 
 Usage: studs_sheet.py file.pdf [--pages 400] [--cell 230]
 """
-import argparse, os, pickle
+import argparse, os, pickle, re
 
 import numpy as np
 import torch
@@ -30,8 +30,8 @@ from audit import embed_batch
 from regression import bucket_with_vetoes
 from model import IconEmbedder
 
-STUD_MIN_AREA = 20000     # matches webapp/studs.js
-SURE_ERR = 0.18   # = FIT_TOL: a lone reading that passed the geometry is trusted
+LATTICE_MIN_AREA = 12000  # below this an icon cannot host a lattice search
+MIN_AGREEING = 2  # a printed size needs this many independent readings agreeing
 
 
 def load(pdf, pages, cache):
@@ -126,14 +126,37 @@ def main():
     rows = bucket_with_vetoes(emb, cols_, asps, 0.25, 45, 0.09)
     print(f"иконок {len(icons)}, строк {len(rows)}")
 
+    # One lattice per callout box, not per icon. Every icon in a box is drawn
+    # at the same scale by the same camera, so the lattice found on the icon
+    # that shows it most clearly describes all of them — and the small ones,
+    # which carry too few stud periods to find a lattice alone, then need
+    # nothing but their two corners. Checked against measuring each icon on its
+    # own: 156 of 156 agree, and 81 icons that could not measure themselves get
+    # an answer.
+    from collections import defaultdict
+    by_box = defaultdict(list)
+    for i, b in enumerate(box_ids):
+        by_box[b].append(i)
+    box_lattice = {}
+    for b, idxs in by_box.items():
+        best, best_score = None, -1.0
+        for i in idxs:
+            if icons[i].shape[0] * icons[i].shape[1] < LATTICE_MIN_AREA:
+                continue
+            got = SC.lattice(icons[i])
+            if got and got[1] > best_score:
+                best_score, best = got[1], got[0]
+        if best is not None:
+            box_lattice[b] = best
+
     per_row = {}
     for r, row in enumerate(rows):
         got = []
         for i in row["idx"]:
-            ic = icons[i]
-            if ic.shape[0] * ic.shape[1] < STUD_MIN_AREA:
+            lat = box_lattice.get(box_ids[i])
+            if lat is None:
                 continue
-            m = SC.measure(ic)
+            m = SC.solve(icons[i], lat)
             if m:
                 got.append((m[0], m[1], i))
         if got:
@@ -146,8 +169,14 @@ def main():
             groups.setdefault(g[0], []).append(g)
         ranked = sorted(groups.values(), key=lambda g: -len(g))
         win = ranked[0]
-        decisive = (len(win) / len(got) > 0.5) if len(win) >= 2 else \
-                   (len(got) == 1 and win[0][1] < SURE_ERR)
+        # Confirmation, not confidence: a size is printed only when at least two
+        # independent readings agree on it. Each reading comes from a different
+        # callout box and they never see each other, so agreement is real
+        # evidence — where one lone reading being close to a whole number is
+        # not. A box whose lattice is wrong produces near-whole, real-looking
+        # sizes all day: page 106 reads a 4x4 plate as 8x4 and an 8x8 as 16x8,
+        # both plausible, both wrong, and nothing about that one reading says so.
+        decisive = len(win) >= MIN_AGREEING and len(win) / len(got) > 0.5
         pages = sorted({pages_of[i] for i in rows[r]["idx"]})
         if not decisive:
             seen = " / ".join(sorted({f"{g[0][0]}x{g[0][1]}" for g in got}))
@@ -167,8 +196,22 @@ def main():
             sized.append((big, f"{size[0]}x{size[1]}  ×{len(grp)} стр.{pages_of[big]}"
                                f" ({len(grp)}/{len(got)})", True))
 
-    print(f"\nстрок с размером: {len(sized)}   без подписи (но измерялись): {len(silent)}")
-    sized.sort(key=lambda e: e[1])
+    # Label-free confirmation: a part is measured once per box it appears in,
+    # and those readings never see each other. Unanimity across them is the
+    # strongest evidence available without anyone counting studs by hand.
+    multi = [g for g in per_row.values() if len(g) >= 2]
+    unan = sum(1 for g in multi if len({x[0] for x in g}) == 1)
+    single = sum(1 for g in per_row.values() if len(g) == 1)
+    print(f"\nстрок с несколькими чтениями: {len(multi)}, из них единогласны "
+          f"{unan} ({unan/max(1,len(multi))*100:.0f}%); строк с одним чтением: {single}")
+    print(f"строк с размером: {len(sized)}   без подписи (но измерялись): {len(silent)}")
+    # Least-confirmed first: a size backed by one reading is the one that needs
+    # a person to look at it. Sizes backed by several independent readings that
+    # agree have already confirmed each other.
+    def backing(entry):
+        m = re.search(r"\((\d+)/(\d+)\)$", entry[1])
+        return (int(m.group(2)), entry[1]) if m else (99, entry[1])
+    sized.sort(key=backing)
     sheet(f"{args.out}_sizes.png", sized, icons, args.cell, args.cols, per_page=args.per_page)
     if silent:
         sheet(f"{args.out}_silent.png", silent, icons, args.cell, args.cols)

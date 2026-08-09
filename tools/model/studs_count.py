@@ -41,6 +41,7 @@ FIT_TOL = 0.18        # how far from whole a count may land
 MIN_PIXELS = 200      # smaller than this and there is nothing to correlate
 STRONG_PEAK = 0.20    # a repeat vector must be this fraction of the best peak
 SQUARE_TOL = 0.80     # the two lattice vectors must be near equal in length
+SUPPORT_FLOOR = 0.10  # how much an icon must repeat along a lattice to accept it
 TOP_PEAKS = 8         # candidate repeat vectors considered per icon
 
 # Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
@@ -179,7 +180,7 @@ def lattice(icon, lag=120):
                 best_score, best = sc, (u, v)
     if best is None or best_score <= 0:
         return None
-    return [best]
+    return [best], best_score
 
 
 def reduce_basis(u, v):
@@ -216,6 +217,74 @@ def face_corners(icon):
             np.array([float(xr), float(ys[xs == xr].min())]))
 
 
+def supports(icon, u, v, floor=SUPPORT_FLOOR):
+    """Does THIS icon actually repeat along the lattice it was handed?
+
+    A lattice borrowed from a box-mate describes the drawing scale, not the
+    part. Applied blindly it measures the silhouette of anything, including a
+    curved slope with no studs at all — and two instances of that slope in two
+    boxes agree with each other, so cross-checking readings does not catch it.
+
+    The part itself has to answer. Shift the icon by one lattice step: a stud
+    grid lands back on itself, a smooth curve does not. Two shifts, no
+    transform, a couple of multiplications per pixel.
+    """
+    fg = P.diff_mask(icon)
+    if fg.sum() < MIN_PIXELS:
+        return False
+    lum = icon.astype(np.float64) @ np.array([0.299, 0.587, 0.114])
+    lum = lum - lum[fg].mean()
+    lum[~fg] = 0.0
+    norm = float((lum * lum).sum()) + 1e-9
+    h, w = lum.shape
+    for vec in (u, v):
+        dx, dy = int(round(vec[0])), int(round(vec[1]))
+        if abs(dx) >= w or abs(dy) >= h:
+            return False
+        a = lum[max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)]
+        b = lum[max(0, -dy):h + min(0, -dy), max(0, -dx):w + min(0, -dx)]
+        if a.size < 100 or float((a * b).sum()) / norm < floor:
+            return False
+    return True
+
+
+def solve(icon, pairs):
+    """Counts for one icon given a lattice someone else may have found.
+
+    Split out from measure() so a box can share one lattice. Every icon in a
+    callout box is drawn at the same scale by the same camera, so the lattice
+    found on the largest of them describes all of them — and the small ones,
+    which carry too few stud periods to find a lattice on their own, then need
+    nothing but their two corners.
+    """
+    corners = face_corners(icon)
+    if not pairs or corners is None:
+        return None
+    left, right = corners
+    for u, v in pairs:
+        if not supports(icon, u, v):
+            continue
+        A = np.stack([u, -v], axis=1)
+        if abs(float(np.linalg.det(A))) < 1e-6:
+            continue
+        try:
+            counts = np.abs(np.linalg.solve(A, right - left))
+        except np.linalg.LinAlgError:
+            continue
+        k = np.round(counts)
+        err = float(np.max(np.abs(counts - k)))
+        if err > FIT_TOL:
+            continue
+        a, b = int(k[0]), int(k[1])
+        if a < 2 or b < 2 or a > MAX_STUDS or b > MAX_STUDS:
+            continue
+        size = (max(a, b), min(a, b))
+        if size not in REAL_SIZES:
+            continue
+        return size, err
+    return None
+
+
 def measure(icon):
     """((long, short), distance from whole) or None when there is no stud grid.
 
@@ -227,10 +296,11 @@ def measure(icon):
     has to pass rather than knobs, so trying more pairs cannot invent an answer,
     only find one that was already there.
     """
-    pairs = lattice(icon)
+    got = lattice(icon)
     corners = face_corners(icon)
-    if not pairs or corners is None:
+    if not got or corners is None:
         return None
+    pairs = got[0]
     left, right = corners
     for u, v in pairs:
         A = np.stack([u, -v], axis=1)

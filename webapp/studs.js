@@ -40,13 +40,27 @@ const STUD_CROP = 256;         // the lattice is read from a centre crop this bi
 const STUD_TOP_PEAKS = 8;      // candidate repeat vectors tried per icon
 const STUD_STRONG_PEAK = 0.20; // a repeat vector must be this much of the best peak
 const STUD_SQUARE_TOL = 0.80;  // the two lattice vectors must be near equal in length
-// A lone reading is trusted when it passed everything else, and no closer to
-// whole than any other reading has to be. The extra tightening this used to
-// carry cost 11 correct labels across the two booklets — every single one of
-// the withheld single-reading rows turned out to be right — while catching
-// nothing. The geometry ahead of it is the filter: reduced basis, square
-// lattice, explains-the-peaks scoring, whole counts, a real LEGO size.
-const STUD_SURE_ERR = STUD_FIT_TOL;
+const STUD_SUPPORT_FLOOR = 0.10; // how much an icon must repeat along a lattice
+const STUD_LATTICE_MIN_AREA = 12000; // below this an icon cannot host a search
+
+/** Best lattice for one callout box, from whichever of its icons shows it best.
+ *
+ * Every icon in a box is drawn at the same scale by the same camera, so one
+ * lattice describes all of them — and the small ones, which carry too few stud
+ * periods to find a lattice alone, then need nothing but their two corners.
+ * Checked against measuring each icon on its own: 156 of 156 agree, and it
+ * gives an answer to 81 icons that could not measure themselves.
+ */
+function studBoxLattice(preps) {
+  let best = null, bestScore = -1;
+  for (const prep of preps) {
+    if (!prep || prep.w * prep.h < STUD_LATTICE_MIN_AREA) continue;
+    const got = studLattice(prep);
+    if (got && got.score > bestScore) { bestScore = got.score; best = got.pair; }
+  }
+  return best;
+}
+const STUD_MIN_AGREEING = 2;   // a printed size needs this many readings agreeing
 
 // Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
 // 1x8, not a discovery — and this number exists to be checked against, so a
@@ -275,17 +289,44 @@ function studLattice(prep) {
       if (sc > bestScore) { bestScore = sc; best = [u, v]; }
     }
   }
-  return best;
+  return best ? { pair: best, score: bestScore } : null;
 }
 
-/** { size: [long, short], err } or null when there is no stud grid to count. */
-function studMeasure(canvas) {
-  if (canvas.width * canvas.height < STUD_MIN_AREA) return null;
-  const prep = studPrepare(canvas);
-  if (!prep) return null;
-  const pair = studLattice(prep);
-  if (!pair) return null;
+/** Does THIS icon actually repeat along the lattice it was handed?
+ *
+ * A lattice borrowed from a box-mate describes the drawing scale, not the part.
+ * Applied blindly it measures the silhouette of anything, including a curved
+ * slope with no studs at all — and two instances of that slope in two boxes
+ * agree with each other, so cross-checking readings does not catch it. Only the
+ * part can answer: shift it by one lattice step and a stud grid lands back on
+ * itself while a smooth curve does not. Measured over a booklet, real plates
+ * score 0.20 and up, that slope scores 0.08 and 0.015.
+ */
+function studSupports(prep, u, v) {
+  const { lum, w, h } = prep;
+  let norm = 0;
+  for (let i = 0; i < lum.length; i++) norm += lum[i] * lum[i];
+  if (norm <= 0) return false;
+  for (const vec of [u, v]) {
+    const dx = Math.round(vec[0]), dy = Math.round(vec[1]);
+    if (Math.abs(dx) >= w || Math.abs(dy) >= h) return false;
+    let acc = 0, n = 0;
+    const y0 = Math.max(0, dy), y1 = h + Math.min(0, dy);
+    const x0 = Math.max(0, dx), x1 = w + Math.min(0, dx);
+    for (let y = y0; y < y1; y++) {
+      const a = y * w, b = (y - dy) * w - dx;
+      for (let x = x0; x < x1; x++, n++) acc += lum[a + x] * lum[b + x];
+    }
+    if (n < 100 || acc / norm < STUD_SUPPORT_FLOOR) return false;
+  }
+  return true;
+}
+
+/** { size: [long, short], err } for one icon, given a lattice found elsewhere. */
+function studSolve(prep, pair) {
+  if (!prep || !pair) return null;
   const [u, v] = pair;
+  if (!studSupports(prep, u, v)) return null;
 
   // solve  W*u - L*v = right - left
   const dx = prep.right[0] - prep.left[0];

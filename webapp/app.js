@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "2.8.0";
+const APP_VERSION = "2.9.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -375,12 +375,21 @@ async function processPage(pageNum) {
 
   const items = [];
   boxes.forEach((box, bi) => {
-    for (const it of extractBoxItems(canvas, ctx, box)) {
-      // which callout box: every icon inside one is drawn at the same scale,
-      // which is what makes the stud measurement in studs.js solvable
+    const boxItems = extractBoxItems(canvas, ctx, box);
+    // Studs are measured here, per box, rather than per icon later: every icon
+    // inside one box is drawn at the same scale by the same camera, so one
+    // lattice describes all of them, and the small ones — which carry too few
+    // stud periods to find a lattice on their own — then need nothing but
+    // their two corners. See studs.js.
+    const crops = boxItems.map((it) => autocropCanvas(it.imgCanvas));
+    const preps = crops.map((c) => studPrepare(c));
+    const lattice = studBoxLattice(preps);
+    boxItems.forEach((it, k) => {
       it.boxIdx = bi;
+      it.cropped = crops[k];
+      it.studs = lattice ? studSolve(preps[k], lattice) : null;
       items.push(it);
-    }
+    });
   });
   // store positions as fractions of the page, so the highlight lands correctly
   // whatever size the page image is displayed at
@@ -1052,9 +1061,9 @@ function findBucket(buckets, sig) {
 }
 
 function addToBuckets(buckets, item, pageNum) {
-  const cropped = autocropCanvas(item.imgCanvas);
+  const cropped = item.cropped || autocropCanvas(item.imgCanvas);
   const sig = computeSignature(cropped);
-  const studs = studMeasure(cropped);
+  const studs = item.studs || null;
 
   let bucket = findBucket(buckets, sig);
   if (!bucket) {
@@ -1130,9 +1139,14 @@ function applyStudSizes(buckets, studItems, pageRecords) {
     }
     const ranked = [...groups.values()].sort((a, b) => b.length - a.length);
     const winner = ranked[0];
-    const decisive = winner.length >= 2
-      ? winner.length / members.length > 0.5
-      : members.length === 1 && winner[0].err < STUD_SURE_ERR;
+    // Confirmation, not confidence. A size is printed only when at least two
+    // readings agree on it, and those readings come from different callout
+    // boxes and never see each other. One reading landing close to a whole
+    // number proves nothing: a box whose lattice is slightly wrong produces
+    // near-whole, real-looking sizes all day — page 106 of one booklet reads a
+    // 4x4 plate as 8x4 and an 8x8 as 16x8, both plausible, both wrong.
+    const decisive = winner.length >= STUD_MIN_AGREEING
+      && winner.length / members.length > 0.5;
     if (decisive) buckets[row].studSize = winner[0].size;
 
     // Splitting does not wait for a majority. A row holding a 6x6 plate and an
