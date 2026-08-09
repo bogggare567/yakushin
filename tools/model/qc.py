@@ -24,6 +24,10 @@ from model import IconEmbedder, IN_SIDE
 SCALES = [3.0, 2.4, 1.9]
 
 
+HARD_COLOR = 30      # below this, colour cannot tell the two icons apart
+HARD_ASPECT = 0.10   # below this, proportions cannot either
+
+
 def collect(pdfs, holdout):
     """Icons from the held-out tail of each booklet, keyed by physical slot."""
     slots = {}   # (pdf,page,box,slot) -> list of icons, one per scale
@@ -116,10 +120,24 @@ def main():
     m_dup = float((dp > thr).mean())
     m_mrg = float((dn <= thr).mean())
 
-    print(f"{'':<22}{'дубли':>12}{'склейки':>12}")
-    print(f"{'алгоритм сейчас':<22}{b_dup*100:>11.2f}%{b_mrg*100:>11.2f}%")
-    print(f"{'модель':<22}{m_dup*100:>11.2f}%{m_mrg*100:>11.2f}%")
+    # The overall merge rate is dominated by easy negatives — two parts of
+    # obviously different colour or shape. What actually goes wrong in the app
+    # is the subset where neither colour nor proportions can help, so measure
+    # that separately or the headline number hides it.
+    hard = np.array([
+        float(np.max(np.abs(sigs[(ka, ia)]["avg"] - sigs[(kb, ib)]["avg"]))) < HARD_COLOR
+        and abs(sigs[(ka, ia)]["logasp"] - sigs[(kb, ib)]["logasp"]) < HARD_ASPECT
+        for ka, ia, kb, ib in neg])
+    b_mrg_h = float(np.array([B.same_part(sigs[(ka, ia)], sigs[(kb, ib)])
+                              for ka, ia, kb, ib in neg])[hard].mean()) if hard.any() else 0.0
+    m_mrg_h = float((dn[hard] <= thr).mean()) if hard.any() else 0.0
+
+    print(f"{'':<26}{'дубли':>10}{'склейки':>10}{'трудные склейки':>18}")
+    print(f"{'алгоритм сейчас':<26}{b_dup*100:>9.2f}%{b_mrg*100:>9.2f}%{b_mrg_h*100:>17.2f}%")
+    print(f"{'модель':<26}{m_dup*100:>9.2f}%{m_mrg*100:>9.2f}%{m_mrg_h*100:>17.2f}%")
     print(f"\nпорог модели: {thr:.3f}")
+    print(f"трудных пар (цвет <{HARD_COLOR} и пропорции <{HARD_ASPECT}): "
+          f"{int(hard.sum())} из {len(neg)}")
     print(f"расстояния: одинаковые детали {dp.mean():.3f} (макс {dp.max():.3f}), "
           f"разные {dn.mean():.3f} (мин {dn.min():.3f})")
 
@@ -127,9 +145,12 @@ def main():
     print("\nВЕРДИКТ:", "модель лучше или не хуже по обоим показателям — можно ставить"
           if better else "модель НЕ лучше — ставить нельзя")
 
-    result = {"baseline": {"duplicate_rate": b_dup, "merge_rate": b_mrg},
-              "model": {"duplicate_rate": m_dup, "merge_rate": m_mrg, "threshold": thr},
-              "n_pos": len(pos), "n_neg": len(neg), "passes": bool(better)}
+    result = {"baseline": {"duplicate_rate": b_dup, "merge_rate": b_mrg,
+                           "merge_rate_hard": b_mrg_h},
+              "model": {"duplicate_rate": m_dup, "merge_rate": m_mrg,
+                        "merge_rate_hard": m_mrg_h, "threshold": thr},
+              "n_pos": len(pos), "n_neg": len(neg), "n_hard": int(hard.sum()),
+              "passes": bool(better)}
     if args.json_out:
         json.dump(result, open(args.json_out, "w"), indent=2)
     return 0 if better else 1

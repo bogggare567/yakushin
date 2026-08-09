@@ -1,9 +1,34 @@
 {
-  "threshold": 0.3358395989974937,
-  "duplicate_rate": 0.006977992485238862,
-  "merge_rate": 0.004975124378109453,
-  "n_pos": 1863,
-  "n_neg": 9045,
-  "pos_mean": 0.07416259497404099,
-  "neg_mean": 1.1256048679351807
+  "baseline": {
+    "duplicate_rate": 0.0776255707762557,
+    "merge_rate": 0.019164118246687054,
+    "merge_rate_hard": 0.1421012849584278
+  },
+  "model": {
+    "duplicate_rate": 0.014713343480466767,
+    "merge_rate": 0.0005096839959225281,
+    "merge_rate_hard": 0.0,
+    "threshold": 0.25
+  },
+  "n_pos": 1971,
+  "n_neg": 9810,
+  "n_hard": 1323,
+  "passes": true,
+  "hand_checked": {
+    "note": "строки, разобранные глазами на двух буклетах; см. groundtruth*.json и regression.py",
+    "settings": {
+      "tol": 0.25,
+      "color_veto": 45,
+      "aspect_veto": 0.15
+    },
+    "booklet_1": {
+      "pairs": 12,
+      "still_merged": 3
+    },
+    "booklet_2": {
+      "pairs": 9,
+      "still_merged": 2
+    },
+    "remaining_kind": "тот же цвет, те же пропорции, другое количество шипов"
+  }
 }

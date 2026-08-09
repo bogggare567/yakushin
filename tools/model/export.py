@@ -1,9 +1,12 @@
 """Folds BatchNorm into the convolutions and writes a flat float32 blob the
 browser can read with one fetch - no ML runtime needed on the client."""
+import sys
 import numpy as np, torch, json
 from model import IconEmbedder, fold_bn, IN_SIDE, EMB_DIM
 
-net = IconEmbedder(); net.load_state_dict(torch.load("model.pt", map_location="cpu")); net.eval()
+src = sys.argv[1] if len(sys.argv) > 1 else "model.pt"
+net = IconEmbedder(); net.load_state_dict(torch.load(src, map_location="cpu")); net.eval()
+print("экспортирую", src, f"(вход {IN_SIDE}x{IN_SIDE})")
 parts, meta = [], []
 for name, conv, bn in [("conv1", net.conv1, net.bn1), ("conv2", net.conv2, net.bn2),
                        ("conv3", net.conv3, net.bn3), ("conv4", net.conv4, net.bn4)]:

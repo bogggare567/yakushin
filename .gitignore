@@ -35,3 +35,9 @@ venv/
 /tools/model/model_buckets*.png
 /tools/model/model_prev_*.pt
 /tools/model/model_candidate.pt
+
+# Model work: re-derivable from the PDFs, or a picture to look at once.
+/tools/model/.icons_*.pkl
+/tools/model/audit*_merges.png
+/tools/model/audit*_dupes.png
+/tools/model/*_metrics.json

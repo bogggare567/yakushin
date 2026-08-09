@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "2.0.0";
+const APP_VERSION = "2.1.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -876,7 +876,14 @@ function computeSignature(canvas) {
     const dr = Math.abs(data[i] - BOX_BG[0]), dg = Math.abs(data[i + 1] - BOX_BG[1]), db = Math.abs(data[i + 2] - BOX_BG[2]);
     fgGrid[p] = Math.max(dr, dg, db) > FG_DIFF_THRESHOLD ? 1 : 0;
   }
-  return { grid, fgGrid, avgColor, embedding: partEmbedding(canvas) };
+  // log(w/h) rather than w/h: a ratio, so the same slack means the same thing
+  // for a 1x2 and a 1x16, and unchanged when the booklet redraws the part
+  // smaller. Kept on the signature so findBucket can veto on it.
+  return {
+    grid, fgGrid, avgColor,
+    logAspect: Math.log(canvas.width / canvas.height),
+    embedding: partEmbedding(canvas),
+  };
 }
 
 function modeSeekColor(bins, fgPixels) {
@@ -942,20 +949,51 @@ function colorDist(a, b) {
 // against the hand-written rules below which score 7.76% / 1.92%:
 //
 //     tolerance   one part split up   different parts fused
-//        0.34          0.66%                 0.47%
+//        0.30          1.27%                 0.20%
+//        0.25          1.47%                 0.05%
 //        0.20          2.23%                 0.00%
 //
-// 0.20 is the shipped setting even though 0.34 looks better on paper: the
-// certain-pair test can only be built from parts that share a callout box, and
-// a smooth tile rarely shares a box with the studded plate of the same
-// footprint - so the loose setting scored well while visibly fusing exactly
-// that pair. Erring towards splitting is also the safer mistake: a fused row
-// hides a part you then never look for, while a duplicated row is only untidy.
+// That test can only be built from parts that share a callout box, which leaves
+// a blind spot it cannot see: a 6x6 plate almost never shares a box with an
+// 8x8, so nothing above would notice the two being fused. Two whole booklets
+// were therefore gone through by hand and the wrong rows written down
+// (tools/model/groundtruth*.json). 0.25 is chosen against both at once — it
+// fixes 16 of the 21 hand-found mistakes while producing FEWER rows than 0.20
+// did, so it is not the usual trade of one error against the other.
+//
+// Erring towards splitting is still the safer mistake: a fused row hides a part
+// you then never look for, while a duplicated row is only untidy.
 //
 // The rules below stay as the fallback for when the model file is missing (a
 // stale cache, someone serving webapp/ without vendor/), so the app degrades
 // to its old behaviour instead of breaking.
-const EMBED_MATCH_TOL = 0.20;
+const EMBED_MATCH_TOL = 0.25;
+
+// Two things the model structurally under-weights, kept as outright vetoes.
+//
+// The icon is squashed into a square and averaged down to 32x32 before the
+// model sees it, so colour is one signal among many and proportions arrive as
+// a single number among 33. An audit of a whole booklet against rows checked by
+// hand (tools/model/audit.py, tools/model/regression.py) found the model
+// putting a yellow plate and an orange one in the same row, and a blue plate in
+// with a blue slope. Both are obvious to the eye and cheap to measure.
+//
+// Both numbers come from measuring the two booklets rather than from taste
+// (tools/model/measure_vetoes.py). Over 9385 pairs that are certainly the same
+// part, seen at three sizes:
+//
+//                       same part      different parts      cost      catches
+//     colour            average 2.4    average 80           1.0%      55%
+//     proportions       average 0.02   average 0.24         2.5%      55%
+//
+// Colour is compared as the largest single-channel difference, proportions as
+// |log(w/h) difference| - a ratio, so it means the same thing for a 1x2 and a
+// 1x16, and it does not move at all when the booklet redraws the part smaller.
+// Together with the model they fix 16 of the 21 hand-checked mistakes. The five
+// that remain are all one kind — same colour, same proportions, a different
+// number of studs (6x6 against 8x8) — which is the known limit today.
+const COLOR_VETO = 45;
+const ASPECT_VETO = 0.15;
 
 // A near-identical shape is strong evidence on its own, so allow the dominant
 // colour to drift further in that case: the same part redrawn at another size
@@ -971,10 +1009,15 @@ function legacySamePart(b, sig) {
 
 function findBucket(buckets, sig) {
   if (sig.embedding) {
-    // nearest bucket within tolerance, not merely the first one that passes
+    // nearest bucket within tolerance, not merely the first one that passes.
+    // A vetoed row is skipped before the distance is even considered, not
+    // rejected afterwards: otherwise the nearest row could be a vetoed one and
+    // the part would start a new row while a perfectly good row sat next to it.
     let best = null, bestD = Infinity;
     for (const b of buckets) {
       if (!b.embedding) continue;
+      if (colorDist(b.avgColor, sig.avgColor) > COLOR_VETO) continue;
+      if (Math.abs(b.logAspect - sig.logAspect) > ASPECT_VETO) continue;
       const d = embeddingDistance(b.embedding, sig.embedding);
       if (d < bestD) { bestD = d; best = b; }
     }
@@ -993,6 +1036,7 @@ function addToBuckets(buckets, item, pageNum) {
       grid: sig.grid,
       fgGrid: sig.fgGrid,
       avgColor: sig.avgColor,
+      logAspect: sig.logAspect,
       embedding: sig.embedding,
       count: 0,
       unsure: false,

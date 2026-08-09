@@ -19,7 +19,7 @@ import pipeline as P
 
 # scales chosen around the app's own 3.0 to span the range LEGO itself uses
 SCALES = [3.0, 2.4, 1.9]
-SIDE = 32   # network input is SIDE x SIDE
+SIDE = 48   # network input is SIDE x SIDE
 
 
 def to_input(icon):

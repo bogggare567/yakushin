@@ -51,7 +51,7 @@ def signature(icon):
     small = np.asarray(Image.fromarray(icon.astype(np.uint8)).resize((nw, nh), Image.BILINEAR), dtype=float)
     grid[oy:oy + nh, ox:ox + nw] = small
     fg = np.max(np.abs(grid - BG), axis=-1) > P.FG_DIFF_THRESHOLD
-    return {"grid": grid, "fg": fg, "avg": avg}
+    return {"grid": grid, "fg": fg, "avg": avg, "logasp": float(math.log(cw / ch))}
 
 
 def grid_dist(a, b):

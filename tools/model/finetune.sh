@@ -15,6 +15,12 @@ PY=./venv/bin/python
 [ -x "$PY" ] || { echo "Нет окружения. Сначала: python3 -m venv venv && venv/bin/pip install torch pymupdf numpy scipy pillow"; exit 1; }
 [ $# -ge 1 ] || { echo "Использование: ./finetune.sh новый.pdf [ещё.pdf ...]"; exit 1; }
 
+# must match webapp/app.js — the checks below only mean something if they test
+# the settings that actually ship
+TOL=0.25
+COLOR_VETO=45
+ASPECT_VETO=0.15
+
 CORPUS_FILE=corpus.txt
 touch "$CORPUS_FILE"
 for f in "$@"; do
@@ -60,7 +66,30 @@ for f in "${ALL[@]}"; do
 done
 
 echo
-echo "=== 4/4  Решение ==="
+echo "=== 4/5  Проверяю ошибки, найденные вручную ==="
+# The certain-pair QC above can only build pairs from parts sharing a callout
+# box, and the mistakes that actually reach the user are the ones that class
+# cannot contain: a 6x6 plate against an 8x8. Those were found by going through
+# whole booklets by eye and written down; a new model has to keep them fixed or
+# the improvement is only on paper.
+for GT in groundtruth*.json; do
+  [ -f "$GT" ] || continue
+  GT_PDF=$($PY -c "import json;print(json.load(open('$GT'))['pdf'])")
+  SRC=$(grep -F "$GT_PDF" "$CORPUS_FILE" | head -1)
+  [ -n "$SRC" ] || { echo "  $GT: нет $GT_PDF в корпусе, пропускаю"; continue; }
+  OLD_BAD=99
+  [ -f model.pt ] && OLD_BAD=$($PY regression.py "$SRC" --truth "$GT" --model model.pt \
+      --tol "$TOL" --color "$COLOR_VETO" --aspect "$ASPECT_VETO" --pages 900 2>/dev/null \
+      | grep -oE 'осталось склеенными: [0-9]+' | grep -oE '[0-9]+$')
+  NEW_BAD=$($PY regression.py "$SRC" --truth "$GT" --model model_candidate.pt \
+      --tol "$TOL" --color "$COLOR_VETO" --aspect "$ASPECT_VETO" --pages 900 2>/dev/null \
+      | grep -oE 'осталось склеенными: [0-9]+' | grep -oE '[0-9]+$')
+  echo "  $GT: осталось склеенными $OLD_BAD -> $NEW_BAD"
+  [ "${NEW_BAD:-99}" -gt "${OLD_BAD:-99}" ] && { echo "    СТАЛО ХУЖЕ на проверенных вручную"; PASS=0; }
+done
+
+echo
+echo "=== 5/5  Решение ==="
 if [ "$PASS" = "1" ]; then
   cp -f model.pt "model_prev_$(date +%Y%m%d_%H%M%S).pt" 2>/dev/null || true
   mv model_candidate.pt model.pt

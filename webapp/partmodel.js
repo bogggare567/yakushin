@@ -9,8 +9,13 @@
  * difference between two genuinely different parts.
  *
  * Measured on pages the model was never trained on:
- *     rows for one part (duplicates)   7.76%  ->  0.66%
- *     several parts in one row (merges) 1.92%  ->  0.47%
+ *     rows for one part (duplicates)   7.76%  ->  1.47%
+ *     several parts in one row (merges) 1.92%  ->  0.05%
+ *
+ * Those pairs can only be built from parts that share a callout box, which is a
+ * blind spot: a 6x6 plate almost never shares a box with an 8x8. Rows checked
+ * by hand on two whole booklets are kept as a separate test the numbers above
+ * cannot see (tools/model/regression.py).
  *
  * Deliberately no ML runtime: the weights are a 66KB float32 blob and the few
  * operations needed (3x3 convolution, ReLU, max-pool, one dense layer) are
@@ -20,7 +25,14 @@
  */
 
 const PARTMODEL_URL = "vendor/partmodel.bin";
-const PM_SIDE = 32;      // icons are stretched to this square
+// 48, not 32. On a real booklet the model kept putting a 6x6 plate in the same
+// row as an 8x8 one, and a smooth tile in with a studded plate — differences
+// that live in the stud grid, and at 32x32 the studs of a large plate were
+// averaged into a flat patch before the third layer ever saw them. Only this
+// number changes: the four convolutions below are the same shape, so the
+// weights file keeps its layout and this file needed no new code. It costs
+// about 2ms per part instead of 1ms.
+const PM_SIDE = 48;      // icons are stretched to this square
 const PM_EMB = 48;
 // [out channels, in channels] of each 3x3 convolution, then the dense layer
 const PM_LAYERS = [[8, 3], [16, 8], [32, 16], [32, 32]];

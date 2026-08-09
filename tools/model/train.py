@@ -90,7 +90,7 @@ def build_pairs(d, mask):
 
 def to_tensor(d, ids, device, jitter=False):
     img = d["images"][ids].astype(np.float32) / 255.0
-    img = torch.from_numpy(img).permute(0, 3, 1, 2).to(device)
+    img = torch.from_numpy(img).permute(0, 3, 1, 2).contiguous().to(device)
     if img.shape[-1] != IN_SIDE:
         img = F.interpolate(img, size=(IN_SIDE, IN_SIDE), mode="bilinear", align_corners=False)
     asp = torch.from_numpy(d["aspects"][ids]).to(device)
@@ -146,7 +146,10 @@ def main():
     ap.add_argument("--margin", type=float, default=0.6)
     args = ap.parse_args()
 
-    device = "cpu"
+    # Apple GPU when present: the hard-negative pool below makes each step
+    # several times heavier, and this turns a coffee break back into a minute.
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    print(f"устройство: {device}")
     d = load(args.dataset)
     train_mask, test_mask = split_by_page(d)
     print(f"samples: {len(d['images'])}   train {train_mask.sum()}   held-out {test_mask.sum()}")
@@ -175,6 +178,7 @@ def main():
 
     all_neg = np.concatenate([neg, far]) if len(far) else neg
     BATCH = 256
+    NEG_POOL = 6   # negatives drawn per positive, of which the hardest are kept
     for ep in range(args.epochs):
         net.train()
         perm = rng.permutation(len(pos))
@@ -182,16 +186,24 @@ def main():
         t0 = time.time()
         for s in range(0, len(perm), BATCH):
             pb = pos[perm[s:s + BATCH]]
-            nb_ids = all_neg[rng.integers(0, len(all_neg), len(pb))]
+            # Draw more negatives than needed and keep only the closest ones.
+            # Without this the loss reaches zero within about twenty epochs and
+            # the model stops learning: almost every certain negative pair is
+            # two obviously different parts, and once those are far apart there
+            # is nothing left to push. The pairs that still go wrong on a real
+            # file are the near-misses, and this is what keeps them in view.
+            nb_ids = all_neg[rng.integers(0, len(all_neg), len(pb) * NEG_POOL)]
             ia, ib = pb[:, 0], pb[:, 1]
             na, nbb = nb_ids[:, 0], nb_ids[:, 1]
             ids = np.concatenate([ia, ib, na, nbb])
             im, asp = to_tensor(d, ids, device, jitter=True)
             e = net(im, asp)
             k = len(pb)
-            ea, eb, fa, fb = e[:k], e[k:2*k], e[2*k:3*k], e[3*k:]
+            ea, eb = e[:k], e[k:2*k]
+            fa, fb = e[2*k:2*k + len(na)], e[2*k + len(na):]
             dpos = (ea - eb).norm(dim=1)
-            dneg = (fa - fb).norm(dim=1)
+            dneg_all = (fa - fb).norm(dim=1)
+            dneg = dneg_all.topk(k, largest=False).values
             # pull identical parts together, push certain-different apart
             loss = F.relu(dpos - 0.2).mean() + F.relu(args.margin - dneg).mean()
             opt.zero_grad(); loss.backward(); opt.step()
