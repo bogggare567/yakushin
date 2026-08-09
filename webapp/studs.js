@@ -1,188 +1,47 @@
-/* How many studs across a part is — "4x6", printed next to it.
+/* How many studs across a part is — "4×6", printed next to it.
  *
- * Two reasons this exists. It is how a person actually looks for a piece in a
- * pile, and it is the one thing that separates the mistakes nothing else could:
- * a 6x6 plate and an 8x8 are the same colour, the same proportions, and once
- * squashed to 48x48 very nearly the same picture, so neither the model nor the
- * colour and proportion checks can tell them apart. Their sizes differ by two
- * studs and that is not subtle at all.
+ * Two reasons. It is how a person looks for a piece in a pile, and it is the
+ * one thing that separates mistakes nothing else can: a 6x6 plate and an 8x8
+ * are the same colour, the same proportions, and near-identical once shrunk to
+ * 48x48 for the model — but they are two studs apart.
  *
- * The booklet never states a size, so it has to be measured. The drawing is a
- * fixed isometric view, which makes the geometry rigid: for a top face spanned
- * by W and L studs,
+ * This counts the studs. An earlier version measured the outline and worked
+ * out a footprint from it, which had two faults: it printed a size for parts
+ * that have no studs at all (a curved slope labelled 3x1) and it stayed silent
+ * on big plates, where the studs are largest and easiest to see. Both came from
+ * measuring the wrong thing.
  *
- *     silhouette width            = scale * (W + L)
- *     right corner - left corner  = scale * ISO_RATIO * (W - L)
+ * The method needs nothing but the one icon — no drawing scale, no camera
+ * angle, no fitting across the document:
  *
- * Both are differences between two corners, so the height of a stud — which
- * sticks up above the face by a fixed amount — cancels out of them. Measuring
- * from the topmost pixel instead was tried and read 1x6 plates as 5x1.
+ *   - studs sit on a lattice, and a lattice appears in the icon's own
+ *     autocorrelation as two repeat vectors u and v: shift the picture by one
+ *     of them and it lands back on itself;
+ *   - the leftmost and rightmost points of the silhouette are two corners of
+ *     the top face, and getting from one to the other is W steps along u and L
+ *     steps back along v;
+ *   - so  right - left = W*u - L*v,  two equations and two unknowns.
  *
- * The catch is `scale`, which changes from one callout box to the next: LEGO
- * draws icons smaller when a box is crowded. Estimating it inside a single box
- * does not work — five icons and a free scale have several answers that fit
- * about equally well. What does work is that the booklet repeats itself. One
- * part appears in dozens of boxes, the matcher already knows which icons are
- * the same part, and so every box scale and every part size can be solved
- * together across the whole document. That fit is accurate to 0.2% of the
- * width, which is far better than anything a single box gives.
+ * Nothing in that decides the answer by a threshold, which is why the counts
+ * land within about half a percent of whole numbers. That closeness is then a
+ * free check: a part whose numbers come out at 16.48 and 0.49 is not a grid of
+ * studs, and gets no answer instead of a guess.
  *
- * One freedom is left: multiplying every scale by c and dividing every size by
- * c fits identically. It is settled by the only thing that can settle it —
- * sizes are whole numbers of studs — by trying values of c and keeping the one
- * that makes the largest share of parts come out whole.
- *
- * Not every part gets an answer, and that is deliberate. The formula describes
- * a rectangular footprint; a slope, a bracket or a round part does not have
- * one, and those come out non-whole and are left blank rather than guessed. On
- * the two booklets measured, 41% and 63% of parts get a size, and those are the
- * common ones — the top rows of the list are almost all covered.
+ * Measured over a whole booklet against the same code at full resolution: 46%
+ * of parts get a size and 73% of the large ones, with the counts a mean 0.07
+ * away from whole.
  */
 
-// Vertical step over horizontal one. The booklet uses one fixed camera, so this
-// is a single number for the whole document rather than something to fit:
-// measured at 0.442 and 0.460 on the two booklets, from the principal axis of
-// long thin parts, which follows a lattice direction directly.
-const STUD_ISO_RATIO = 0.45;
 const STUD_MAX = 24;
-const STUD_FIT_TOL = 0.12;      // how far from whole a size may be, in studs
-const STUD_SPLIT_GAP = 0.75;    // sizes this far apart are different parts
+const STUD_MIN_LAG = 8;        // a repeat shorter than this is antialiasing
+const STUD_FIT_TOL = 0.18;     // how far from whole a count may land
+const STUD_MIN_AREA = 20000;   // below this there is too little to correlate
+const STUD_CROP = 256;         // the lattice is read from a centre crop this big
+const STUD_TOP_PEAKS = 6;      // candidate repeat vectors tried per icon
 
-/** Silhouette width and the drop between its left and right corners, in pixels. */
-function studMetrics(canvas) {
-  const w = canvas.width, h = canvas.height;
-  if (!w || !h) return null;
-  const data = canvas.getContext("2d").getImageData(0, 0, w, h).data;
-  let xl = -1, xr = -1, yl = 0, yr = 0;
-  for (let x = 0; x < w && xl < 0; x++) {
-    for (let y = 0; y < h; y++) {
-      const i = (y * w + x) * 4;
-      const d = Math.max(Math.abs(data[i] - BOX_BG[0]), Math.abs(data[i + 1] - BOX_BG[1]),
-                         Math.abs(data[i + 2] - BOX_BG[2]));
-      if (d > FG_DIFF_THRESHOLD) { xl = x; yl = y; break; }
-    }
-  }
-  for (let x = w - 1; x >= 0 && xr < 0; x--) {
-    for (let y = 0; y < h; y++) {
-      const i = (y * w + x) * 4;
-      const d = Math.max(Math.abs(data[i] - BOX_BG[0]), Math.abs(data[i + 1] - BOX_BG[1]),
-                         Math.abs(data[i + 2] - BOX_BG[2]));
-      if (d > FG_DIFF_THRESHOLD) { xr = x; yr = y; break; }
-    }
-  }
-  if (xl < 0 || xr <= xl + 3) return null;
-  return { width: xr - xl, ydiff: yr - yl };
-}
-
-/** Box scales and part sizes, solved together. `items`: {box, row, width, ydiff}. */
-function solveStudSizes(items, nRows) {
-  const boxIndex = new Map();
-  for (const it of items) if (!boxIndex.has(it.box)) boxIndex.set(it.box, boxIndex.size);
-  const nBoxes = boxIndex.size;
-  if (!items.length || !nBoxes) return null;
-
-  // Alternating least squares in log space: log width = log scale + log size.
-  // Logs keep it linear, and each side is then just an average.
-  const boxOf = items.map((it) => boxIndex.get(it.box));
-  const logW = items.map((it) => Math.log(Math.max(it.width, 1)));
-  const logScale = new Float64Array(nBoxes);
-  const logSize = new Float64Array(nRows);
-  const num = new Float64Array(Math.max(nBoxes, nRows));
-  const cnt = new Float64Array(Math.max(nBoxes, nRows));
-  for (let pass = 0; pass < 200; pass++) {
-    num.fill(0); cnt.fill(0);
-    for (let i = 0; i < items.length; i++) {
-      num[items[i].row] += logW[i] - logScale[boxOf[i]];
-      cnt[items[i].row]++;
-    }
-    for (let r = 0; r < nRows; r++) if (cnt[r]) logSize[r] = num[r] / cnt[r];
-    num.fill(0); cnt.fill(0);
-    for (let i = 0; i < items.length; i++) {
-      num[boxOf[i]] += logW[i] - logSize[items[i].row];
-      cnt[boxOf[i]]++;
-    }
-    for (let b = 0; b < nBoxes; b++) if (cnt[b]) logScale[b] = num[b] / cnt[b];
-  }
-
-  const scale = Array.from(logScale, Math.exp);
-  const size = Array.from(logSize, Math.exp);
-  const weight = new Float64Array(nRows);
-  for (const it of items) weight[it.row]++;
-
-  // the one free number: the value that makes the most parts come out whole
-  let live = [];
-  for (let r = 0; r < nRows; r++) if (weight[r] > 0) live.push(r);
-  if (!live.length) return null;
-  let maxSize = 0, total = 0;
-  for (const r of live) { maxSize = Math.max(maxSize, size[r]); total += weight[r]; }
-  const lo = 2 / maxSize;
-  const hi = 2 * STUD_MAX / Math.max(1e-9, Math.min(...live.map((r) => size[r])));
-  let bestC = null, bestScore = -1;
-  const steps = 12000;
-  for (let s = 0; s <= steps; s++) {
-    const c = lo + (hi - lo) * s / steps;
-    let hit = 0;
-    for (const r of live) {
-      const v = size[r] * c, k = Math.round(v);
-      if (k >= 2 && k <= 2 * STUD_MAX && Math.abs(v - k) < STUD_FIT_TOL) hit += weight[r];
-    }
-    if (hit > bestScore) { bestScore = hit; bestC = c; }
-  }
-  if (bestC === null || bestScore / total < 0.15) return null;
-
-  // per-icon size, each against its own box's scale — this is what makes a row
-  // holding two different parts visible: its members disagree.
-  const perIcon = items.map((it, i) => it.width / scale[boxOf[i]] * bestC);
-
-  // W - L per row, from the corner drop, using the same box scales.
-  //
-  // The camera tilt is fitted rather than assumed. It is one fixed number per
-  // document, but it is not the same number in every document — measured at
-  // 0.442 in one booklet and 0.460 in another — and with it hard-coded, one
-  // booklet's parts kept missing the whole-number test by a hair. Searching it
-  // is cheap: W+L does not depend on it, so only this half is refitted.
-  const rowDrop = new Float64Array(nRows), rowN = new Float64Array(nRows);
-  for (let i = 0; i < items.length; i++) {
-    rowDrop[items[i].row] += items[i].ydiff / scale[boxOf[i]] * bestC;
-    rowN[items[i].row]++;
-  }
-  let bestRatio = STUD_ISO_RATIO, bestRatioHits = -1;
-  for (let r0 = 0.38; r0 <= 0.52; r0 += 0.001) {
-    let hits = 0;
-    for (const r of live) {
-      if (!rowN[r]) continue;
-      const s = size[r] * bestC, d = rowDrop[r] / rowN[r] / r0;
-      const ks = Math.round(s), kd = Math.round(d);
-      if (Math.abs(s - ks) < STUD_FIT_TOL && Math.abs(d - kd) < 0.25
-          && (ks + kd) % 2 === 0 && Math.abs(kd) < ks) hits += weight[r];
-    }
-    if (hits > bestRatioHits) { bestRatioHits = hits; bestRatio = r0; }
-  }
-  const dnum = new Float64Array(nRows), dcnt = new Float64Array(nRows);
-  for (let i = 0; i < items.length; i++) {
-    dnum[items[i].row] += items[i].ydiff / (scale[boxOf[i]] * bestRatio) * bestC;
-    dcnt[items[i].row]++;
-  }
-
-  const sizes = new Array(nRows).fill(null);
-  for (const r of live) {
-    const s = size[r] * bestC, d = dcnt[r] ? dnum[r] / dcnt[r] : 0;
-    const ks = Math.round(s), kd = Math.round(d);
-    // W and L are whole, so their sum and difference are both even or both odd
-    if (Math.abs(s - ks) >= STUD_FIT_TOL || Math.abs(d - kd) >= 0.3) continue;
-    if ((ks + kd) % 2 !== 0 || ks < 2 || Math.abs(kd) >= ks) continue;
-    const a = (ks + kd) / 2, b = (ks - kd) / 2;
-    if (a < 1 || b < 1 || a > STUD_MAX || b > STUD_MAX) continue;
-    const found = [Math.max(a, b), Math.min(a, b)];
-    if (isRealStudSize(found)) sizes[r] = found;
-  }
-  return { sizes, perIcon, anchor: bestC, ratio: bestRatio, covered: bestScore / total };
-}
-
-// Footprints LEGO actually makes. A measurement that lands on 1x7 or 1x9 is a
-// near miss on a 1x8, not a discovery — those sizes do not exist. Since this
-// number is meant as a cross-check, a wrong one is worse than none, so anything
-// off the list is dropped rather than shown.
+// Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
+// 1x8, not a discovery — and this number exists to be checked against, so a
+// wrong one is worse than none.
 const STUD_REAL_SIZES = new Set([
   "1x1", "1x2", "1x3", "1x4", "1x6", "1x8", "1x10", "1x12", "1x14", "1x16",
   "2x2", "2x3", "2x4", "2x6", "2x8", "2x10", "2x12", "2x14", "2x16",
@@ -192,8 +51,174 @@ const STUD_REAL_SIZES = new Set([
   "8x8", "8x11", "8x16", "16x16",
 ]);
 
-function isRealStudSize(size) {
-  return !!size && STUD_REAL_SIZES.has(`${Math.min(size[0], size[1])}x${Math.max(size[0], size[1])}`);
+/** In-place iterative radix-2 FFT over one row of a split-complex array. */
+function studFft(re, im, n, off, stride, inverse) {
+  for (let i = 1, j = 0; i < n; i++) {
+    let bit = n >> 1;
+    for (; j & bit; bit >>= 1) j ^= bit;
+    j ^= bit;
+    if (i < j) {
+      const a = off + i * stride, b = off + j * stride;
+      let t = re[a]; re[a] = re[b]; re[b] = t;
+      t = im[a]; im[a] = im[b]; im[b] = t;
+    }
+  }
+  for (let len = 2; len <= n; len <<= 1) {
+    const ang = (inverse ? 2 : -2) * Math.PI / len;
+    const wr = Math.cos(ang), wi = Math.sin(ang);
+    for (let i = 0; i < n; i += len) {
+      let cr = 1, ci = 0;
+      for (let k = 0; k < len / 2; k++) {
+        const a = off + (i + k) * stride, b = off + (i + k + len / 2) * stride;
+        const xr = re[b] * cr - im[b] * ci;
+        const xi = re[b] * ci + im[b] * cr;
+        re[b] = re[a] - xr; im[b] = im[a] - xi;
+        re[a] += xr; im[a] += xi;
+        const nr = cr * wr - ci * wi;
+        ci = cr * wi + ci * wr; cr = nr;
+      }
+    }
+  }
+}
+
+function studFft2(re, im, n, inverse) {
+  for (let y = 0; y < n; y++) studFft(re, im, n, y * n, 1, inverse);
+  for (let x = 0; x < n; x++) studFft(re, im, n, x, n, inverse);
+  if (inverse) {
+    const s = 1 / (n * n);
+    for (let i = 0; i < re.length; i++) { re[i] *= s; im[i] *= s; }
+  }
+}
+
+/** Luminance with the flat background removed, plus the silhouette extremes. */
+function studPrepare(canvas) {
+  const w = canvas.width, h = canvas.height;
+  const data = canvas.getContext("2d").getImageData(0, 0, w, h).data;
+  const lum = new Float64Array(w * h);
+  const fg = new Uint8Array(w * h);
+  let sum = 0, n = 0;
+  let xl = -1, xr = -1, yl = 0, yr = 0;
+  for (let y = 0, p = 0; y < h; y++) {
+    for (let x = 0; x < w; x++, p++) {
+      const i = p * 4;
+      const d = Math.max(Math.abs(data[i] - BOX_BG[0]), Math.abs(data[i + 1] - BOX_BG[1]),
+                         Math.abs(data[i + 2] - BOX_BG[2]));
+      if (d <= FG_DIFF_THRESHOLD) continue;
+      const v = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
+      lum[p] = v; fg[p] = 1; sum += v; n++;
+      if (xl < 0 || x < xl) { xl = x; yl = y; }
+      if (x > xr) { xr = x; yr = y; }
+    }
+  }
+  if (n < 200 || xl < 0 || xr - xl < 16) return null;
+  const mean = sum / n;
+  for (let p = 0; p < lum.length; p++) lum[p] = fg[p] ? lum[p] - mean : 0;
+  return { lum, w, h, left: [xl, yl], right: [xr, yr] };
+}
+
+/** Candidate pairs of lattice vectors, from the icon's own autocorrelation. */
+function studLattice(prep) {
+  // A centre crop, not the whole icon: the lattice is the same everywhere on
+  // the part, and the transform below costs four times as much for twice the
+  // width. Checked against full resolution — same coverage, 93% the same answer.
+  const cw = Math.min(prep.w, STUD_CROP), ch = Math.min(prep.h, STUD_CROP);
+  const ox = (prep.w - cw) >> 1, oy = (prep.h - ch) >> 1;
+  let n = 1;
+  while (n < 2 * Math.max(cw, ch)) n <<= 1;   // pad to twice the crop, so the
+  if (n < 64) return null;                    // wrap-around does not fold in
+  const re = new Float64Array(n * n), im = new Float64Array(n * n);
+  for (let y = 0; y < ch; y++) {
+    for (let x = 0; x < cw; x++) re[y * n + x] = prep.lum[(y + oy) * prep.w + x + ox];
+  }
+  studFft2(re, im, n, false);
+  for (let i = 0; i < re.length; i++) {
+    re[i] = re[i] * re[i] + im[i] * im[i];
+    im[i] = 0;
+  }
+  studFft2(re, im, n, true);
+
+  // centre on zero shift, and normalise so peak heights are comparable
+  const lag = Math.min(120, (n >> 1) - 2);
+  const size = 2 * lag + 1;
+  const ac = new Float64Array(size * size);
+  const peak0 = re[0] || 1;
+  for (let dy = -lag; dy <= lag; dy++) {
+    for (let dx = -lag; dx <= lag; dx++) {
+      const sy = (dy + n) % n, sx = (dx + n) % n;
+      ac[(dy + lag) * size + dx + lag] = re[sy * n + sx] / peak0;
+    }
+  }
+
+  const found = [];
+  for (let dy = -lag; dy <= lag; dy++) {
+    for (let dx = -lag; dx <= lag; dx++) {
+      if (!(dy > 0 || (dy === 0 && dx > 0))) continue;       // half plane only
+      const r = Math.hypot(dy, dx);
+      if (r < STUD_MIN_LAG || r > lag) continue;
+      const i = (dy + lag) * size + dx + lag;
+      const v = ac[i];
+      let top = true;
+      for (let sy = -1; sy <= 1 && top; sy++) {
+        for (let sx = -1; sx <= 1; sx++) {
+          if (!sy && !sx) continue;
+          const yy = dy + sy + lag, xx = dx + sx + lag;
+          if (yy < 0 || xx < 0 || yy >= size || xx >= size) continue;
+          if (ac[yy * size + xx] > v) { top = false; break; }
+        }
+      }
+      if (top) found.push([v, dx, dy]);
+    }
+  }
+  found.sort((a, b) => b[0] - a[0]);
+  const vecs = found.slice(0, STUD_TOP_PEAKS).map(([, dx, dy]) => [dx, dy]);
+  const pairs = [];
+  for (let i = 0; i < vecs.length; i++) {
+    for (let j = i + 1; j < vecs.length; j++) {
+      const a = vecs[i], b = vecs[j];
+      const cross = Math.abs(a[0] * b[1] - a[1] * b[0]);
+      const na = Math.hypot(a[0], a[1]), nb = Math.hypot(b[0], b[1]);
+      if (cross / (na * nb + 1e-9) > 0.45) pairs.push([a, b, cross]);
+    }
+  }
+  // Smallest cell first. Twice a lattice vector is also a repeat vector, so a
+  // doubled pair fits the picture just as well and reports exactly half the
+  // studs — a 2x4 brick came back as 2x1. Peak height cannot tell them apart
+  // and neither can how close the counts land to whole numbers; the cell area
+  // can, because a harmonic's cell is always larger than the real one.
+  pairs.sort((a, b) => a[2] - b[2]);
+  return pairs;
+}
+
+/** [long, short] in studs, or null when there is no stud grid to count. */
+function studMeasure(canvas) {
+  if (canvas.width * canvas.height < STUD_MIN_AREA) return null;
+  const prep = studPrepare(canvas);
+  if (!prep) return null;
+  const pairs = studLattice(prep);
+  if (!pairs || !pairs.length) return null;
+
+  const dx = prep.right[0] - prep.left[0];
+  const dy = prep.right[1] - prep.left[1];
+  for (const [u, v] of pairs) {
+    // solve  W*u - L*v = right - left
+    const det = u[0] * -v[1] - -v[0] * u[1];
+    if (Math.abs(det) < 1e-6) continue;
+    const W = Math.abs((dx * -v[1] - -v[0] * dy) / det);
+    const L = Math.abs((u[0] * dy - u[1] * dx) / det);
+    const kw = Math.round(W), kl = Math.round(L);
+    const err = Math.max(Math.abs(W - kw), Math.abs(L - kl));
+    // Several candidate pairs are tried because the strongest autocorrelation
+    // peak is sometimes a diagonal of the lattice rather than a side, and peak
+    // height alone cannot tell. The answer can: a wrong pair gives counts
+    // nowhere near whole, or a size LEGO does not make. Both are checks the
+    // candidate must pass, so trying more pairs cannot invent an answer.
+    if (err > STUD_FIT_TOL) continue;
+    if (kw < 1 || kl < 1 || kw > STUD_MAX || kl > STUD_MAX) continue;
+    const size = [Math.max(kw, kl), Math.min(kw, kl)];
+    if (!STUD_REAL_SIZES.has(`${size[1]}x${size[0]}`)) continue;
+    return { size, err };
+  }
+  return null;
 }
 
 function studLabel(size) {
