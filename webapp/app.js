@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "3.1.0";
+const APP_VERSION = "3.2.1";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -39,6 +39,7 @@ const MIN_ROW_GAP = 2 * SIZE_K; // px of background rows between icon and qty te
 // Requiring 5*SIZE_K of width threw away every "1" in a booklet whose digits
 // are smaller (6540963), and "1x" is the commonest quantity there is, so most
 // of its callouts came back with no number at all.
+const MAX_PLAUSIBLE_QTY = 200;       // a callout never asks for more
 const MIN_GLYPH_H = 8 * SIZE_K;
 const MIN_GLYPH_W = 2 * SIZE_K;      // narrower than this is a speck
 const MAX_GLYPH_ASPECT = 1.6;        // wider than tall is not a digit
@@ -541,16 +542,33 @@ function findBlueBoxes(imgData, width, height) {
  * hard-coded for the two Super Yacht sets, and finds the different one the
  * third set uses.
  */
+/** Work out what colour THIS booklet fills its parts callouts with.
+ *
+ * Nothing about a colour is assumed. What every format shares is the shape of
+ * the thing: a callout is a rectangle of FLAT colour, that colour is not the
+ * page background, and it holds drawings so it is not empty. Flat regions are
+ * found by asking whether a pixel's neighbourhood is uniform; the big,
+ * rectangular, non-empty ones are collected across a spread of pages and their
+ * fills tallied. A callout fill is the same on every page — the side of a brick
+ * in an assembly drawing is not.
+ *
+ * A cheaper first attempt ranked the frequent colours and tried each with the
+ * ordinary box finder. It worked on three booklets and failed on five: their
+ * page is mid-grey, their callouts are plain white panels covering little of
+ * it, and "which colour yields a few boxes" chose a green out of the model.
+ *
+ * Checked on eight booklets in three liveries: it recovers the colour that used
+ * to be hard-coded, the darker blue another set uses, and the white panels of
+ * five more.
+ */
 async function learnCalloutColour(from, to) {
   const nPages = to - from + 1;
-  const step = Math.max(1, Math.floor(nPages / 10));
-  const sample = [];
-  for (let p = from; p <= to && sample.length < 10; p += step) sample.push(p);
-  if (!sample.length) return;
-
+  const step = Math.max(1, Math.floor(nPages / 8));
+  const k = LEARN_SCALE / SCALE_REF;
+  const minW = 40 * k, minH = 40 * k, minArea = 2000 * k * k;
   const tally = new Map();
-  const renders = [];
-  for (const pageNum of sample) {
+
+  for (let pageNum = from; pageNum <= to; pageNum += step) {
     const page = await pdfDoc.getPage(pageNum);
     const viewport = page.getViewport({ scale: LEARN_SCALE });
     const canvas = document.createElement("canvas");
@@ -558,32 +576,97 @@ async function learnCalloutColour(from, to) {
     canvas.height = Math.ceil(viewport.height);
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
     await page.render({ canvasContext: ctx, viewport }).promise;
-    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    renders.push({ img, w: canvas.width, h: canvas.height });
-    const d = img.data;
-    for (let i = 0; i < d.length; i += 4 * 7) {
-      const key = ((d[i] >> 3) << 12) | ((d[i + 1] >> 3) << 6) | (d[i + 2] >> 3);
-      tally.set(key, (tally.get(key) || 0) + 1);
-    }
-  }
-  const candidates = [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
-    .map(([k]) => [((k >> 12) & 63) * 8 + 4, ((k >> 6) & 63) * 8 + 4, (k & 63) * 8 + 4]);
+    const w = canvas.width, h = canvas.height;
+    const { data } = ctx.getImageData(0, 0, w, h);
 
-  const was = BOX_BG;
-  let best = null;
-  for (const cand of candidates) {
-    BOX_BG = cand;
-    let credit = 0, total = 0;
-    for (const r of renders) {
-      const n = findBlueBoxes(r.img, r.w, r.h).length;
-      total += n;
-      if (n >= 1 && n <= 5) credit++;
+    // what most of this page is
+    const bins = new Map();
+    for (let i = 0; i < data.length; i += 4 * 5) {
+      const key = ((data[i] >> 3) << 12) | ((data[i + 1] >> 3) << 6) | (data[i + 2] >> 3);
+      let a = bins.get(key);
+      if (!a) bins.set(key, (a = [0, 0, 0, 0]));
+      a[0]++; a[1] += data[i]; a[2] += data[i + 1]; a[3] += data[i + 2];
     }
-    if (!best || credit > best.credit || (credit === best.credit && total > best.total)) {
-      best = { cand, credit, total };
+    let top = null;
+    for (const a of bins.values()) if (!top || a[0] > top[0]) top = a;
+    const bg = [top[1] / top[0], top[2] / top[0], top[3] / top[0]];
+
+    // flat, and not the page. Four samples two pixels out is enough to tell a
+    // printed fill from a drawing or an anti-aliased edge.
+    const sum = new Int32Array(w * h);
+    for (let p = 0, i = 0; p < w * h; p++, i += 4) sum[p] = data[i] + data[i + 1] + data[i + 2];
+    const mask = new Uint8Array(w * h);
+    for (let y = 2; y < h - 2; y++) {
+      for (let x = 2; x < w - 2; x++) {
+        const p = y * w + x, v = sum[p];
+        if (Math.abs(v - sum[p - 2]) > 24 || Math.abs(v - sum[p + 2]) > 24 ||
+            Math.abs(v - sum[p - 2 * w]) > 24 || Math.abs(v - sum[p + 2 * w]) > 24) continue;
+        const i = p * 4;
+        if (Math.max(Math.abs(data[i] - bg[0]), Math.abs(data[i + 1] - bg[1]),
+                     Math.abs(data[i + 2] - bg[2])) <= 12) continue;
+        mask[p] = 1;
+      }
+    }
+
+    const seenHere = new Set();
+    const visited = new Uint8Array(w * h);
+    const stack = [];
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const start0 = y * w + x;
+        if (!mask[start0] || visited[start0]) continue;
+        let minX = x, maxX = x, minY = y, maxY = y, count = 0, sr = 0, sg = 0, sb = 0;
+        stack.length = 0; stack.push(start0); visited[start0] = 1;
+        while (stack.length) {
+          const cur = stack.pop();
+          count++;
+          const ci = cur * 4;
+          sr += data[ci]; sg += data[ci + 1]; sb += data[ci + 2];
+          const cx = cur % w, cy = (cur / w) | 0;
+          if (cx < minX) minX = cx;
+          if (cx > maxX) maxX = cx;
+          if (cy < minY) minY = cy;
+          if (cy > maxY) maxY = cy;
+          if (cx > 0 && mask[cur - 1] && !visited[cur - 1]) { visited[cur - 1] = 1; stack.push(cur - 1); }
+          if (cx < w - 1 && mask[cur + 1] && !visited[cur + 1]) { visited[cur + 1] = 1; stack.push(cur + 1); }
+          if (cy > 0 && mask[cur - w] && !visited[cur - w]) { visited[cur - w] = 1; stack.push(cur - w); }
+          if (cy < h - 1 && mask[cur + w] && !visited[cur + w]) { visited[cur + w] = 1; stack.push(cur + w); }
+        }
+        const bw = maxX - minX + 1, bh = maxY - minY + 1, area = bw * bh;
+        if (bw < minW || bh < minH || area < minArea) continue;
+        if (area > w * h * 0.55) continue;      // that is the page, not a box on it
+        if (count / area < 0.55) continue;      // and it has to be a rectangle
+        const fill = [sr / count, sg / count, sb / count];
+        let content = 0, seen = 0;
+        for (let yy = minY; yy <= maxY; yy += 2) {
+          for (let xx = minX; xx <= maxX; xx += 2, seen++) {
+            const j = (yy * w + xx) * 4;
+            if (Math.max(Math.abs(data[j] - fill[0]), Math.abs(data[j + 1] - fill[1]),
+                         Math.abs(data[j + 2] - fill[2])) > 30) content++;
+          }
+        }
+        if (seen && content / seen < 0.01) continue;   // an empty panel is not a callout
+        const key = ((Math.round(fill[0]) >> 3) << 12) | ((Math.round(fill[1]) >> 3) << 6)
+                  | (Math.round(fill[2]) >> 3);
+        let acc = tally.get(key);
+        if (!acc) tally.set(key, (acc = { area: 0, pages: 0, r: 0, g: 0, b: 0 }));
+        acc.area += area;
+        acc.r += fill[0] * area; acc.g += fill[1] * area; acc.b += fill[2] * area;
+        if (!seenHere.has(key)) { seenHere.add(key); acc.pages++; }
+      }
     }
   }
-  BOX_BG = best && best.credit > 0 ? best.cand : was;
+
+  // the fill that keeps coming back, page after page
+  let best = null;
+  for (const acc of tally.values()) {
+    if (acc.pages < 3) continue;
+    if (!best || acc.area > best.area) best = acc;
+  }
+  if (best) {
+    BOX_BG = [Math.round(best.r / best.area), Math.round(best.g / best.area),
+              Math.round(best.b / best.area)];
+  }
   console.log("Цвет выносок этого буклета:", BOX_BG.join(","));
 }
 
@@ -784,6 +867,7 @@ let LEARN_REPORT = null;      // what the learning pass saw, for diagnosis
 const GLYPH_CLUSTER_DIST = 0.13;   // share of bits that may differ within one shape
 const GLYPH_MIN_CLUSTER = 4;       // shapes seen fewer times than this are noise
 const GLYPH_LABEL_DIST = 0.42;     // how far a clean prototype may sit from a template
+const GLYPH_LABEL_MARGIN = 0.75;   // and how much closer than the next-best digit
 
 function glyphDistance(a, b) {
   let d = 0;
@@ -850,13 +934,19 @@ async function learnGlyphs(from, to) {
       learned.push({ label: "x", bits: proto, n: c.members.length });
       continue;
     }
-    let bestLabel = null, bestD = Infinity;
+    let bestLabel = null, bestD = Infinity, runnerUp = Infinity;
     for (const t of TEMPLATES) {
       if (t.label === "x") continue;          // digits are matched to digits
       const d = glyphDistance(t.bits, proto);
-      if (d < bestD) { bestD = d; bestLabel = t.label; }
+      if (d < bestD) { runnerUp = bestD; bestD = d; bestLabel = t.label; }
+      else if (d < runnerUp && t.label !== bestLabel) runnerUp = d;
     }
-    if (bestLabel !== null && bestD <= GLYPH_W * GLYPH_H * GLYPH_LABEL_DIST) {
+    // Close to one digit is not enough — it has to be clearly closer to that
+    // one than to any other. A prototype that is merely nearest gets labelled
+    // confidently and then misreads every quantity it appears in, which is how
+    // a booklet ended up learning "4" and "8" for digits that were neither.
+    if (bestLabel !== null && bestD <= GLYPH_W * GLYPH_H * GLYPH_LABEL_DIST
+        && bestD <= runnerUp * GLYPH_LABEL_MARGIN) {
       learned.push({ label: bestLabel, bits: proto, n: c.members.length });
     }
   }
@@ -943,7 +1033,13 @@ function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
   // drop trailing "x" marker(s); keep only leading digits
   const digits = label.replace(/x+$/i, "");
   if (!/^\d+$/.test(digits)) return { qty: null, unsure: true };
-  return { qty: parseInt(digits, 10), unsure: anyUnsure };
+  const value = parseInt(digits, 10);
+  // A callout asks for a handful of a part, never thousands. Misread digits
+  // used to sail through and be added up: one grey booklet totalled 732145
+  // parts. An implausible number is a failed read, and saying so is far better
+  // than reporting it.
+  if (value < 1 || value > MAX_PLAUSIBLE_QTY) return { qty: null, unsure: true };
+  return { qty: value, unsure: anyUnsure };
 }
 
 // 8-connected flood fill so a diagonally-touching antialiased stroke still
