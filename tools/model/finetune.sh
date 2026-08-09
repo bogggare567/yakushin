@@ -32,7 +32,11 @@ mapfile -t ALL < "$CORPUS_FILE"
 echo "Корпус (${#ALL[@]} файлов):"; printf '  %s\n' "${ALL[@]}"
 
 echo
-echo "=== 1/4  Извлекаю детали из всего корпуса ==="
+# extract_dataset.py also measures each icon's size in studs while it goes;
+# train.py turns every pair of differing sizes into a certain negative. That is
+# the one class the callout-box rule cannot produce, so it costs nothing here
+# and is where the remaining errors live.
+echo "=== 1/5  Извлекаю детали из всего корпуса ==="
 $PY extract_dataset.py dataset_new.npz "${ALL[@]}"
 
 echo

@@ -10,6 +10,13 @@ guessing:
   positive   the same slot rendered at another scale
   negative A a different slot of the SAME callout box (a box never repeats a part)
   negative B any icon whose dominant colour is far away (never the same part)
+  negative C any two icons whose measured stud size differs (studs_count.py)
+
+Negative C is the one that needed building. Negatives A and B can only pair
+parts that share a callout box or differ in colour, and the mistakes that
+actually reached the client were neither: a 6x6 plate against an 8x8, same
+colour, same proportions, and almost never in the same box. Counting the studs
+gives that pair a certain label at last, anywhere in the document.
 
 Random icons from elsewhere are deliberately NOT used as negatives: two icons
 on different pages are often the very same part, and training on that would
@@ -45,7 +52,33 @@ def load(path):
     z = np.load(path, allow_pickle=True)
     d = {k: z[k] for k in z.files}
     d["colours"] = dominant_colours(d["images"])
+    if "studs" in d:
+        d["slot_size"] = slot_sizes(d)
     return d
+
+
+def slot_sizes(d):
+    """One stud size per slot, carried to every scale of it.
+
+    A size can only be read off the largest renders — at the smaller scales the
+    studs are not resolved — so measuring per icon covers 6% of the set. But a
+    slot is one physical part, so whatever was read at any scale applies to all
+    of them, and the vote guards against a single bad read.
+    """
+    per_group = {}
+    for i, (a, b) in enumerate(d["studs"]):
+        if a <= 0:
+            continue
+        per_group.setdefault(int(d["groups"][i]), []).append((int(a), int(b)))
+    out = {}
+    for g, seen in per_group.items():
+        counts = {}
+        for s in seen:
+            counts[s] = counts.get(s, 0) + 1
+        best, n = max(counts.items(), key=lambda kv: kv[1])
+        if n / len(seen) > 0.5:
+            out[g] = best
+    return out
 
 
 def split_by_page(d, holdout_frac=0.2):
@@ -169,6 +202,21 @@ def main():
     far = np.array(far) if far else np.zeros((0, 2), dtype=int)
     print(f"                + {len(far)} colour-certain negatives")
 
+    # different measured stud size => certainly different parts, wherever they
+    # sit in the document. This is the class the callout-box rule cannot reach.
+    sized = [i for i in idx if int(d["groups"][i]) in d.get("slot_size", {})]
+    stud_neg = []
+    if len(sized) > 1:
+        sized = np.array(sized)
+        for _ in range(len(pos)):
+            a, b = rng.integers(0, len(sized), 2)
+            ga, gb = int(d["groups"][sized[a]]), int(d["groups"][sized[b]])
+            if d["slot_size"][ga] != d["slot_size"][gb]:
+                stud_neg.append((sized[a], sized[b]))
+    stud_neg = np.array(stud_neg) if stud_neg else np.zeros((0, 2), dtype=int)
+    print(f"                + {len(stud_neg)} stud-size-certain negatives "
+          f"(from {len(d.get('slot_size', {}))} measured slots)")
+
     net = IconEmbedder().to(device)
     if args.init:
         net.load_state_dict(torch.load(args.init, map_location=device))
@@ -176,7 +224,8 @@ def main():
     opt = torch.optim.Adam(net.parameters(), lr=2e-3)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, args.epochs)
 
-    all_neg = np.concatenate([neg, far]) if len(far) else neg
+    parts_neg = [neg] + [x for x in (far, stud_neg) if len(x)]
+    all_neg = np.concatenate(parts_neg)
     BATCH = 256
     NEG_POOL = 6   # negatives drawn per positive, of which the hardest are kept
     for ep in range(args.epochs):
