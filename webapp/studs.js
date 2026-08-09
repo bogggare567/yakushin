@@ -37,7 +37,9 @@ const STUD_MIN_LAG = 8;        // a repeat shorter than this is antialiasing
 const STUD_FIT_TOL = 0.18;     // how far from whole a count may land
 const STUD_MIN_AREA = 20000;   // below this there is too little to correlate
 const STUD_CROP = 256;         // the lattice is read from a centre crop this big
-const STUD_TOP_PEAKS = 6;      // candidate repeat vectors tried per icon
+const STUD_TOP_PEAKS = 8;      // candidate repeat vectors tried per icon
+const STUD_STRONG_PEAK = 0.20; // a repeat vector must be this much of the best peak
+const STUD_SURE_ERR = 0.08;    // a lone reading is only trusted this close to whole
 
 // Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
 // 1x8, not a discovery — and this number exists to be checked against, so a
@@ -116,11 +118,80 @@ function studPrepare(canvas) {
   return { lum, w, h, left: [xl, yl], right: [xr, yr] };
 }
 
-/** Candidate pairs of lattice vectors, from the icon's own autocorrelation. */
+/** Bilinear read of the autocorrelation at a fractional shift. */
+function studSample(ac, lag, size, x, y) {
+  if (Math.abs(x) > lag - 1 || Math.abs(y) > lag - 1) return null;
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  const fx = x - x0, fy = y - y0;
+  const i = y0 + lag, j = x0 + lag;
+  return ac[i * size + j] * (1 - fx) * (1 - fy) + ac[i * size + j + 1] * fx * (1 - fy)
+       + ac[(i + 1) * size + j] * (1 - fx) * fy + ac[(i + 1) * size + j + 1] * fx * fy;
+}
+
+/** How well one candidate lattice explains the whole autocorrelation.
+ *
+ * Two halves, and both are needed:
+ *   support   every point the lattice predicts should really be a repeat. A
+ *             lattice half the true size predicts twice as many points and the
+ *             extra ones land between studs, where nothing repeats.
+ *   coverage  every strong peak that exists should be a point of the lattice.
+ *             A lattice twice the true size explains every other peak and
+ *             misses the rest.
+ *
+ * Ranking candidates by cell area instead of by this is what made the counter
+ * unstable: the same part rendered at three sizes came back with three
+ * different answers 72% of the time, because the ordering rather than the
+ * picture was deciding.
+ */
+function studScore(ac, lag, size, peaks, u, v) {
+  const pred = [];
+  let sum = 0;
+  for (let m = -3; m <= 3; m++) {
+    for (let n = -3; n <= 3; n++) {
+      if (!m && !n) continue;
+      const x = m * u[0] + n * v[0], y = m * u[1] + n * v[1];
+      if (Math.hypot(x, y) < STUD_MIN_LAG) continue;
+      const val = studSample(ac, lag, size, x, y);
+      if (val === null) continue;
+      pred.push([x, y]);
+      sum += val;
+    }
+  }
+  if (pred.length < 3) return -1;
+  let hit = 0;
+  for (const [py, px] of peaks) {
+    if (pred.some(([x, y]) => Math.abs(px - x) <= 2.5 && Math.abs(py - y) <= 2.5)) hit++;
+  }
+  return (sum / pred.length) * (hit / Math.max(1, peaks.length));
+}
+
+/** The two shortest vectors of the lattice these two span (Gauss reduction).
+ *
+ * This is what stops the counts coming out as (W+L, L). A diagonal of the cell
+ * is a perfectly good repeat vector, and the cell it spans with one of the
+ * sides has exactly the same area as the real one — so "prefer the smallest
+ * cell" could not tell them apart, and a 2x4 brick was reported as 6x2.
+ * Reduction removes the choice: every basis of a lattice reduces to the same
+ * shortest pair.
+ */
+function studReduce(u, v) {
+  let a = u.slice(), b = v.slice();
+  for (let k = 0; k < 50; k++) {
+    const da = a[0] * a[0] + a[1] * a[1], db = b[0] * b[0] + b[1] * b[1];
+    if (da > db) { const t = a; a = b; b = t; }
+    const aa = a[0] * a[0] + a[1] * a[1];
+    const m = Math.round((a[0] * b[0] + a[1] * b[1]) / Math.max(aa, 1e-9));
+    if (m === 0) break;
+    b = [b[0] - m * a[0], b[1] - m * a[1]];
+  }
+  return [a, b];
+}
+
+/** The stud grid of this icon as two repeat vectors, or null. */
 function studLattice(prep) {
   // A centre crop, not the whole icon: the lattice is the same everywhere on
   // the part, and the transform below costs four times as much for twice the
-  // width. Checked against full resolution — same coverage, 93% the same answer.
+  // width. Checked against full resolution — same coverage, 93% same answer.
   const cw = Math.min(prep.w, STUD_CROP), ch = Math.min(prep.h, STUD_CROP);
   const ox = (prep.w - cw) >> 1, oy = (prep.h - ch) >> 1;
   let n = 1;
@@ -137,26 +208,24 @@ function studLattice(prep) {
   }
   studFft2(re, im, n, true);
 
-  // centre on zero shift, and normalise so peak heights are comparable
   const lag = Math.min(120, (n >> 1) - 2);
   const size = 2 * lag + 1;
   const ac = new Float64Array(size * size);
   const peak0 = re[0] || 1;
   for (let dy = -lag; dy <= lag; dy++) {
     for (let dx = -lag; dx <= lag; dx++) {
-      const sy = (dy + n) % n, sx = (dx + n) % n;
-      ac[(dy + lag) * size + dx + lag] = re[sy * n + sx] / peak0;
+      ac[(dy + lag) * size + dx + lag] = re[((dy + n) % n) * n + ((dx + n) % n)] / peak0;
     }
   }
 
   const found = [];
+  let strongest = 0;
   for (let dy = -lag; dy <= lag; dy++) {
     for (let dx = -lag; dx <= lag; dx++) {
       if (!(dy > 0 || (dy === 0 && dx > 0))) continue;       // half plane only
       const r = Math.hypot(dy, dx);
-      if (r < STUD_MIN_LAG || r > lag) continue;
-      const i = (dy + lag) * size + dx + lag;
-      const v = ac[i];
+      if (r < STUD_MIN_LAG || r > lag - 2) continue;
+      const v = ac[(dy + lag) * size + dx + lag];
       let top = true;
       for (let sy = -1; sy <= 1 && top; sy++) {
         for (let sx = -1; sx <= 1; sx++) {
@@ -166,59 +235,63 @@ function studLattice(prep) {
           if (ac[yy * size + xx] > v) { top = false; break; }
         }
       }
-      if (top) found.push([v, dx, dy]);
+      if (top) { found.push([v, dx, dy]); if (v > strongest) strongest = v; }
     }
   }
-  found.sort((a, b) => b[0] - a[0]);
-  const vecs = found.slice(0, STUD_TOP_PEAKS).map(([, dx, dy]) => [dx, dy]);
-  const pairs = [];
-  for (let i = 0; i < vecs.length; i++) {
-    for (let j = i + 1; j < vecs.length; j++) {
-      const a = vecs[i], b = vecs[j];
+  // only peaks that are really strong: a stud has its own rim and top, and
+  // those make weak bumps that are not repeats of the lattice at all
+  const peaks = found.filter(([v]) => v >= STUD_STRONG_PEAK * strongest)
+                     .sort((a, b) => b[0] - a[0])
+                     .slice(0, STUD_TOP_PEAKS)
+                     .map(([, dx, dy]) => [dy, dx]);
+  if (peaks.length < 2) return null;
+
+  let best = null, bestScore = 0;
+  const seen = new Set();
+  for (let i = 0; i < peaks.length; i++) {
+    for (let j = i + 1; j < peaks.length; j++) {
+      const a = [peaks[i][1], peaks[i][0]], b = [peaks[j][1], peaks[j][0]];
       const cross = Math.abs(a[0] * b[1] - a[1] * b[0]);
       const na = Math.hypot(a[0], a[1]), nb = Math.hypot(b[0], b[1]);
-      if (cross / (na * nb + 1e-9) > 0.45) pairs.push([a, b, cross]);
+      if (cross / (na * nb + 1e-9) <= 0.3) continue;
+      const [u, v] = studReduce(a, b);
+      const key = `${Math.round(u[0])},${Math.round(u[1])},${Math.round(v[0])},${Math.round(v[1])}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const sc = studScore(ac, lag, size, peaks, u, v);
+      if (sc > bestScore) { bestScore = sc; best = [u, v]; }
     }
   }
-  // Smallest cell first. Twice a lattice vector is also a repeat vector, so a
-  // doubled pair fits the picture just as well and reports exactly half the
-  // studs — a 2x4 brick came back as 2x1. Peak height cannot tell them apart
-  // and neither can how close the counts land to whole numbers; the cell area
-  // can, because a harmonic's cell is always larger than the real one.
-  pairs.sort((a, b) => a[2] - b[2]);
-  return pairs;
+  return best;
 }
 
-/** [long, short] in studs, or null when there is no stud grid to count. */
+/** { size: [long, short], err } or null when there is no stud grid to count. */
 function studMeasure(canvas) {
   if (canvas.width * canvas.height < STUD_MIN_AREA) return null;
   const prep = studPrepare(canvas);
   if (!prep) return null;
-  const pairs = studLattice(prep);
-  if (!pairs || !pairs.length) return null;
+  const pair = studLattice(prep);
+  if (!pair) return null;
+  const [u, v] = pair;
 
+  // solve  W*u - L*v = right - left
   const dx = prep.right[0] - prep.left[0];
   const dy = prep.right[1] - prep.left[1];
-  for (const [u, v] of pairs) {
-    // solve  W*u - L*v = right - left
-    const det = u[0] * -v[1] - -v[0] * u[1];
-    if (Math.abs(det) < 1e-6) continue;
-    const W = Math.abs((dx * -v[1] - -v[0] * dy) / det);
-    const L = Math.abs((u[0] * dy - u[1] * dx) / det);
-    const kw = Math.round(W), kl = Math.round(L);
-    const err = Math.max(Math.abs(W - kw), Math.abs(L - kl));
-    // Several candidate pairs are tried because the strongest autocorrelation
-    // peak is sometimes a diagonal of the lattice rather than a side, and peak
-    // height alone cannot tell. The answer can: a wrong pair gives counts
-    // nowhere near whole, or a size LEGO does not make. Both are checks the
-    // candidate must pass, so trying more pairs cannot invent an answer.
-    if (err > STUD_FIT_TOL) continue;
-    if (kw < 1 || kl < 1 || kw > STUD_MAX || kl > STUD_MAX) continue;
-    const size = [Math.max(kw, kl), Math.min(kw, kl)];
-    if (!STUD_REAL_SIZES.has(`${size[1]}x${size[0]}`)) continue;
-    return { size, err };
-  }
-  return null;
+  const det = u[0] * -v[1] - -v[0] * u[1];
+  if (Math.abs(det) < 1e-6) return null;
+  const W = Math.abs((dx * -v[1] - -v[0] * dy) / det);
+  const L = Math.abs((u[0] * dy - u[1] * dx) / det);
+  const kw = Math.round(W), kl = Math.round(L);
+  const err = Math.max(Math.abs(W - kw), Math.abs(L - kl));
+
+  // Nothing above picked the answer by a threshold, so how close these land to
+  // whole numbers is a free check rather than a fitted result. A part that
+  // comes out at 16.48 and 0.49 is not a rectangular grid of studs.
+  if (err > STUD_FIT_TOL) return null;
+  if (kw < 1 || kl < 1 || kw > STUD_MAX || kl > STUD_MAX) return null;
+  const size = [Math.max(kw, kl), Math.min(kw, kl)];
+  if (!STUD_REAL_SIZES.has(`${size[1]}x${size[0]}`)) return null;
+  return { size, err };
 }
 
 function studLabel(size) {

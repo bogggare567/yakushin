@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "2.3.0";
+const APP_VERSION = "2.4.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -1087,16 +1087,20 @@ function smallThumb(canvas) {
 }
 
 
-/** Give each row its size in studs, and split any row whose parts disagree.
+/** Give each row its size in studs, by vote, and split rows that hold two parts.
  *
- * Each icon large enough to read was already counted while the pages were
- * walked (studs.js). A row is one part, so its icons should all report the same
- * size; when they do not, the row is holding more than one part. That is the
- * case nothing else catches — same colour, same proportions, near-identical to
- * the model — and it is exactly where a 6x6 plate ends up with an 8x8.
+ * One reading is not enough. Measuring a stud grid off a drawing is delicate —
+ * on the same part rendered at three different sizes the reading agrees only
+ * about four times in five — so a single icon deciding what a row is called
+ * would show the client a wrong number often enough to be worse than useless.
  *
- * The size shown for a row is taken from whichever reading landed closest to a
- * whole number, which is normally the largest, cleanest drawing of the part.
+ * But a part appears in dozens of callout boxes, and every one of them is
+ * measured. Taking the majority turns four-out-of-five into something much
+ * firmer, and where there is no majority the row simply gets no size, which is
+ * the right answer rather than a fallback.
+ *
+ * Splitting is held to the same standard: a row is only broken in two when
+ * BOTH sizes have real support. A single odd reading is noise, not a part.
  */
 function applyStudSizes(buckets, studItems, pageRecords) {
   if (!studItems.length) return;
@@ -1114,12 +1118,16 @@ function applyStudSizes(buckets, studItems, pageRecords) {
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(m);
     }
-    // the reading closest to whole decides which size the row keeps
-    const ranked = [...groups.entries()].sort(
-      (a, b) => Math.min(...a[1].map((m) => m.err)) - Math.min(...b[1].map((m) => m.err)));
-    buckets[row].studSize = ranked[0][1][0].size;
+    const ranked = [...groups.values()].sort((a, b) => b.length - a.length);
+    const winner = ranked[0];
+    const decisive = winner.length >= 2
+      ? winner.length / members.length > 0.5
+      : members.length === 1 && winner[0].err < STUD_SURE_ERR;
+    if (decisive) buckets[row].studSize = winner[0].size;
 
-    for (const [, moving] of ranked.slice(1)) {
+    // a second size only counts as a second part if it was seen more than once
+    for (const moving of ranked.slice(1)) {
+      if (moving.length < 2 || !decisive) continue;
       const src = buckets[row];
       const dst = {
         grid: src.grid, fgGrid: src.fgGrid, avgColor: src.avgColor,
@@ -1138,9 +1146,8 @@ function applyStudSizes(buckets, studItems, pageRecords) {
   }
 
   // Page lists are rebuilt from the page records rather than patched as items
-  // move. Not every icon gets measured — most are too small to read — and any
-  // attempt to rebuild a row's pages from what moved would quietly drop the
-  // pages of the ones that never were.
+  // move. Most icons are too small to measure and never appear in studItems at
+  // all, so rebuilding a row's pages from what moved would drop theirs.
   buckets.forEach((b) => b.pages.clear());
   for (const rec of pageRecords) {
     for (const it of rec.items) {

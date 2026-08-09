@@ -55,13 +55,65 @@ REAL_SIZES = {
 }
 
 
-def lattice(icon, lag=120):
-    """The two repeat vectors of the stud grid, from this icon's autocorrelation.
+def _sample(ac, lag, x, y):
+    """Bilinear read of the autocorrelation at a fractional shift."""
+    if abs(x) > lag - 1 or abs(y) > lag - 1:
+        return None
+    x0, y0 = int(np.floor(x)), int(np.floor(y))
+    fx, fy = x - x0, y - y0
+    i, j = y0 + lag, x0 + lag
+    return float(ac[i, j] * (1 - fx) * (1 - fy) + ac[i, j + 1] * fx * (1 - fy)
+                 + ac[i + 1, j] * (1 - fx) * fy + ac[i + 1, j + 1] * fx * fy)
 
-    One icon at a time, deliberately. An earlier version summed these over a
-    whole callout box to get more signal, and found directions that were not
-    even mirror images of each other: icons in a box are different shapes, and
-    adding their autocorrelations smears every peak away.
+
+def score_lattice(ac, lag, peaks, u, v):
+    """How well one candidate lattice explains the whole autocorrelation.
+
+    Two halves, and both are needed:
+
+      support   every point the lattice predicts should actually be a repeat.
+                A lattice half the true size predicts twice as many points, and
+                the extra ones sit between real studs where nothing repeats.
+      coverage  every strong peak that is there should be a point of the
+                lattice. A lattice twice the true size explains only every
+                other peak and misses the rest.
+
+    Ranking candidates by cell area instead of by this was what made the
+    counter unstable: the same part measured at three render sizes came back
+    with three different answers 72% of the time, because the ordering, not the
+    picture, was deciding.
+    """
+    pred, support = [], []
+    for m in range(-3, 4):
+        for n in range(-3, 4):
+            if m == 0 and n == 0:
+                continue
+            x, y = m * u[0] + n * v[0], m * u[1] + n * v[1]
+            if np.hypot(x, y) < MIN_LAG:
+                continue
+            s = _sample(ac, lag, x, y)
+            if s is None:
+                continue
+            pred.append((x, y))
+            support.append(s)
+    if len(support) < 3:
+        return -1.0
+
+    hit = 0
+    for py, px, _ in peaks:
+        if any(abs(px - x) <= 2.5 and abs(py - y) <= 2.5 for x, y in pred):
+            hit += 1
+    coverage = hit / max(1, len(peaks))
+    return float(np.mean(support)) * coverage
+
+
+def lattice(icon, lag=120):
+    """The stud grid of this icon, as two repeat vectors, or None.
+
+    One icon at a time, deliberately. An earlier version summed the
+    autocorrelation over a whole callout box to get more signal, and found
+    directions that were not even mirror images of each other: icons in a box
+    are different shapes, and adding their autocorrelations smears every peak.
     """
     fg = P.diff_mask(icon)
     if fg.sum() < MIN_PIXELS:
@@ -71,36 +123,36 @@ def lattice(icon, lag=120):
     lum[~fg] = 0.0
     h, w = lum.shape
     F = np.fft.rfft2(lum, s=(2 * h, 2 * w))
-    ac = np.fft.fftshift(np.fft.irfft2(F * np.conj(F), s=(2 * h, 2 * w)))
+    full = np.fft.fftshift(np.fft.irfft2(F * np.conj(F), s=(2 * h, 2 * w)))
     lag = int(min(lag, h - 1, w - 1))
     if lag < MIN_LAG + 2:
         return None
-    win = ac[h - lag:h + lag + 1, w - lag:w + lag + 1]
-    win = win / (win[lag, lag] + 1e-9)
+    ac = full[h - lag:h + lag + 1, w - lag:w + lag + 1]
+    ac = ac / (ac[lag, lag] + 1e-9)
 
     yy, xx = np.mgrid[-lag:lag + 1, -lag:lag + 1]
     rr = np.hypot(yy, xx)
-    peak = np.ones_like(win, dtype=bool)
+    peak = np.ones_like(ac, dtype=bool)
     for sy in (-1, 0, 1):
         for sx in (-1, 0, 1):
             if sy or sx:
-                peak &= win >= np.roll(np.roll(win, sy, 0), sx, 1)
+                peak &= ac >= np.roll(np.roll(ac, sy, 0), sx, 1)
     # half plane only: autocorrelation is symmetric through the origin
-    peak &= (rr >= MIN_LAG) & (rr <= lag) & ((yy > 0) | ((yy == 0) & (xx > 0)))
+    peak &= (rr >= MIN_LAG) & (rr <= lag - 2) & ((yy > 0) | ((yy == 0) & (xx > 0)))
     ys, xs = np.nonzero(peak)
     if len(ys) < 2:
         return None
-    vals = win[ys, xs]
-    # only peaks that are actually strong: a stud has its own rim and top, and
-    # those make weak bumps at half the spacing which are not repeats of the
-    # lattice at all
+    vals = ac[ys, xs]
     keep = vals >= STRONG_PEAK * vals.max()
     ys, xs, vals = ys[keep], xs[keep], vals[keep]
     if len(ys) < 2:
         return None
     order = np.argsort(-vals)[:TOP_PEAKS]
-    vecs = [np.array([float(xx[ys[i], xs[i]]), float(yy[ys[i], xs[i]])]) for i in order]
-    out, seen = [], set()
+    peaks = [(float(yy[ys[i], xs[i]]), float(xx[ys[i], xs[i]]), float(vals[i])) for i in order]
+    vecs = [np.array([px, py]) for py, px, _ in peaks]
+
+    best, best_score = None, -1.0
+    seen = set()
     for i in range(len(vecs)):
         for j in range(i + 1, len(vecs)):
             a, b = vecs[i], vecs[j]
@@ -112,12 +164,12 @@ def lattice(icon, lag=120):
             if key in seen:
                 continue
             seen.add(key)
-            out.append((abs(u[0] * v[1] - u[1] * v[0]), u, v))
-    # smallest cell first — safe now that every candidate is reduced, so a
-    # diagonal pair can no longer masquerade as a different lattice of the
-    # same area
-    out.sort(key=lambda t: t[0])
-    return [(u, v) for _, u, v in out] or None
+            sc = score_lattice(ac, lag, peaks, u, v)
+            if sc > best_score:
+                best_score, best = sc, (u, v)
+    if best is None or best_score <= 0:
+        return None
+    return [best]
 
 
 def reduce_basis(u, v):
