@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "2.1.0";
+const APP_VERSION = "2.2.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -270,6 +270,7 @@ async function runAnalysis() {
 
   const buckets = [];
   const pageRecords = [];
+  const studItems = [];   // one entry per icon, for the stud-size solve below
   const totalPages = to - from + 1;
   let pagesWithParts = 0;
 
@@ -281,9 +282,17 @@ async function runAnalysis() {
       if (items.length) pagesWithParts++;
       const pageItems = [];
       for (const it of items) {
-        const bucketIdx = addToBuckets(buckets, it, pageNum);
+        const { index: bucketIdx, metrics, thumb } = addToBuckets(buckets, it, pageNum);
         const qty = it.qty ?? 1;
         pageItems.push({ bucketIdx, qty, unsure: it.unsure || it.qty === null, rect: it.rect });
+        if (metrics) {
+          studItems.push({
+            box: `${pageNum}:${it.boxIdx}`, row: bucketIdx,
+            width: metrics.width, ydiff: metrics.ydiff,
+            pr: pageRecords.length, ii: pageItems.length - 1,
+            qty, page: pageNum, thumb,
+          });
+        }
       }
       pageRecords.push({ pageNum, thumbDataUrl, items: pageItems });
     } catch (err) {
@@ -294,6 +303,8 @@ async function runAnalysis() {
   }
 
   if (myRunToken !== activeRunToken) return; // abandoned while the loop ran
+
+  applyStudSizes(buckets, studItems, pageRecords);
 
   setProgress(1, "Готово");
   progressFill.classList.remove("is-active");
@@ -364,9 +375,14 @@ async function processPage(pageNum) {
   const boxes = findBlueBoxes(full, canvas.width, canvas.height);
 
   const items = [];
-  for (const box of boxes) {
-    items.push(...extractBoxItems(canvas, ctx, box));
-  }
+  boxes.forEach((box, bi) => {
+    for (const it of extractBoxItems(canvas, ctx, box)) {
+      // which callout box: every icon inside one is drawn at the same scale,
+      // which is what makes the stud measurement in studs.js solvable
+      it.boxIdx = bi;
+      items.push(it);
+    }
+  });
   // store positions as fractions of the page, so the highlight lands correctly
   // whatever size the page image is displayed at
   for (const it of items) {
@@ -1029,6 +1045,7 @@ function findBucket(buckets, sig) {
 function addToBuckets(buckets, item, pageNum) {
   const cropped = autocropCanvas(item.imgCanvas);
   const sig = computeSignature(cropped);
+  const metrics = studMetrics(cropped);
 
   let bucket = findBucket(buckets, sig);
   if (!bucket) {
@@ -1053,7 +1070,100 @@ function addToBuckets(buckets, item, pageNum) {
     bucket.count += item.qty;
   }
   bucket.pages.add(pageNum);
-  return buckets.indexOf(bucket);
+  // a small picture per icon, not just per row: if the stud sizes later show a
+  // row is holding two different parts, the half that moves out needs a
+  // picture of its own, and the cropped canvas is gone by then
+  return { index: buckets.indexOf(bucket), metrics, thumb: smallThumb(cropped) };
+}
+
+/** A cheap thumbnail, wide enough to recognise a part and no wider. */
+function smallThumb(canvas) {
+  const max = 110;
+  const k = Math.min(1, max / Math.max(canvas.width, canvas.height));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(canvas.width * k));
+  c.height = Math.max(1, Math.round(canvas.height * k));
+  c.getContext("2d").drawImage(canvas, 0, 0, c.width, c.height);
+  return c.toDataURL("image/png");
+}
+
+
+/** Measure each part in studs, and split any row whose members disagree.
+ *
+ * This runs after everything is matched, because it needs the whole document
+ * at once: the size of a part and the drawing scale of a box are solved
+ * against each other, and one part appearing in many boxes is what makes that
+ * possible (see studs.js).
+ *
+ * The split is the point, not a side effect. A 6x6 plate and an 8x8 survive
+ * every other check — same colour, same proportions, near-identical once
+ * shrunk to 48x48 — and are two studs apart here, which is not subtle. On the
+ * booklets measured by hand this catches three of the five mistakes nothing
+ * else could.
+ */
+function applyStudSizes(buckets, studItems, pageRecords) {
+  if (!studItems.length) return;
+  let solved;
+  try {
+    solved = solveStudSizes(studItems, buckets.length);
+  } catch (err) {
+    console.warn("Размер в шипах посчитать не удалось", err);
+    return;
+  }
+  if (!solved) return;
+
+  // group each row's icons by their own measured size; a row that holds one
+  // part has one group, a row that fused two parts has two
+  const byRow = new Map();
+  studItems.forEach((it, i) => {
+    if (!byRow.has(it.row)) byRow.set(it.row, []);
+    byRow.get(it.row).push({ it, size: solved.perIcon[i] });
+  });
+
+  for (const [row, members] of byRow) {
+    if (members.length < 2) continue;
+    const sorted = members.slice().sort((a, b) => a.size - b.size);
+    // the largest gap between consecutive sizes; a real split shows up there
+    let cut = -1, gap = 0;
+    for (let i = 1; i < sorted.length; i++) {
+      const g = sorted[i].size - sorted[i - 1].size;
+      if (g > gap) { gap = g; cut = i; }
+    }
+    if (gap < STUD_SPLIT_GAP || cut < 0) continue;
+    const moving = sorted.slice(cut);
+    if (!moving.length || moving.length === sorted.length) continue;
+
+    const src = buckets[row];
+    const dst = {
+      grid: src.grid, fgGrid: src.fgGrid, avgColor: src.avgColor,
+      logAspect: src.logAspect, embedding: src.embedding,
+      count: 0, unsure: src.unsure, pages: new Set(),
+      thumbUrl: moving[0].it.thumb || src.thumbUrl,
+    };
+    const dstIdx = buckets.push(dst) - 1;
+    for (const m of moving) {
+      dst.count += m.it.qty;
+      src.count -= m.it.qty;
+      dst.pages.add(m.it.page);
+      pageRecords[m.it.pr].items[m.it.ii].bucketIdx = dstIdx;
+    }
+    solved.sizes[dstIdx] = null;
+    const avg = (arr) => arr.reduce((a, m) => a + m.size, 0) / arr.length;
+    src.studTotal = avg(sorted.slice(0, cut));
+    dst.studTotal = avg(moving);
+  }
+
+  // Page lists are rebuilt from the page records rather than patched as items
+  // move. Not every icon gets measured — a silhouette can be unreadable — and
+  // those unmeasured ones never appear in studItems, so anything that tried to
+  // rebuild a row's pages from what moved would quietly drop their pages.
+  buckets.forEach((b) => b.pages.clear());
+  for (const rec of pageRecords) {
+    for (const it of rec.items) {
+      if (buckets[it.bucketIdx]) buckets[it.bucketIdx].pages.add(rec.pageNum);
+    }
+  }
+  buckets.forEach((b, i) => { b.studSize = solved.sizes[i] || null; });
 }
 
 // ---------- sorting ----------
@@ -1332,6 +1442,7 @@ function makePartCard(bucket, qty, unsure, pages, bucketIdx) {
     <div class="part-row">
       <button type="button" class="part-check" aria-label="Отметить как собранную" title="Отметить как собранную">✓</button>
       <div class="part-qty ${unsure ? "unsure" : ""}">×${qty}${unsure ? " ?" : ""}</div>
+      ${bucket.studSize ? `<div class="part-studs" title="Размер в шипах">${studLabel(bucket.studSize)}</div>` : ""}
     </div>
     <div class="part-pages">стр. ${summarizePages(pagesArr)}</div>
   `;

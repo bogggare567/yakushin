@@ -1091,3 +1091,17 @@ input[type="range"] {
     border-bottom: 1px solid var(--border);
   }
 }
+
+/* Size in studs, next to the count. Muted rather than loud: it is a check and
+   a search aid, not the number you are counting out. */
+.part-studs {
+  margin-left: auto;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  color: #7d8aa3;
+  background: #eef1f6;
+  border-radius: 5px;
+  padding: 2px 6px;
+  white-space: nowrap;
+}

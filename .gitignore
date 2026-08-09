@@ -38,6 +38,8 @@ venv/
 
 # Model work: re-derivable from the PDFs, or a picture to look at once.
 /tools/model/.icons_*.pkl
+/tools/model/.boxicons_*.pkl
+/tools/model/studs*.png
 /tools/model/audit*_merges.png
 /tools/model/audit*_dupes.png
 /tools/model/*_metrics.json
