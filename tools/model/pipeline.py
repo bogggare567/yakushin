@@ -33,6 +33,9 @@ def diff_mask(img, threshold=FG_DIFF_THRESHOLD):
 def find_blue_boxes(img, scale=RENDER_SCALE):
     k = _size_k(scale)
     min_w, min_h, min_area = 40 * k, 40 * k, 400 * k * k
+    # a box on the page, not the page itself: without this the page background
+    # colour scores as one perfect rectangle per page
+    max_area = img.shape[0] * img.shape[1] * 0.55
     mask = np.all(np.abs(img.astype(int) - BOX_BG) <= BOX_COLOR_TOL, axis=-1)
     lab, _ = ndimage.label(mask, structure=np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]]))
     out = []
@@ -44,7 +47,16 @@ def find_blue_boxes(img, scale=RENDER_SCALE):
         bw, bh = x1 - x0 + 1, y1 - y0 + 1
         if bw < min_w or bh < min_h or bw * bh < min_area:
             continue
+        if bw * bh > max_area:
+            continue
         if int((lab[sl] == i).sum()) / (bw * bh) < 0.5:
+            continue
+        # A callout holds drawings. A solid dark blob in an assembly picture is
+        # also a large flat rectangle, and without this it passes — which is
+        # what made "guess the callout colour by counting boxes" pick near-black
+        # for the yacht booklets.
+        inside = np.max(np.abs(img[sl].astype(int) - BOX_BG), axis=-1) > 30
+        if inside.mean() < 0.02:
             continue
         out.append((x0, y0, x1, y1))
     # left-to-right, top-to-bottom, so slot identity is stable across scales

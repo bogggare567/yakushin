@@ -15,11 +15,18 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "2.9.0";
+const APP_VERSION = "3.0.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
-const BOX_BG = [215, 238, 254]; // the light-blue "new parts" callout background color
+// The colour a booklet fills its parts callouts with. Learned per document
+// rather than fixed: this value is what LEGO uses in the Super Yacht booklets,
+// but another set (6540963) has a light blue PAGE and callouts in a slightly
+// darker blue with a pink border. Against that one, a hard-coded colour
+// flood-filled the whole page and reported one "part" per page. The default
+// below is only the fallback for a document the learner cannot read.
+let BOX_BG = [215, 238, 254];
+const LEARN_SCALE = 1.5; // pages are rendered small for the colour survey
 const BOX_COLOR_TOL = 14; // tolerance for matching the box background color
 const FG_DIFF_THRESHOLD = 35; // per-pixel max-channel diff to count as foreground (icon/text) inside a box
 const SCALE_REF = 2.0; // the render scale the px-based constants below were tuned at
@@ -274,6 +281,17 @@ async function runAnalysis() {
   const totalPages = to - from + 1;
   let pagesWithParts = 0;
 
+  // Before anything else, find out what colour this booklet uses. Every step
+  // downstream — box detection, cutting a box into slots, the foreground mask,
+  // the dominant colour of a part — measures against it.
+  setProgress(0, "Разбираюсь в оформлении буклета…");
+  try {
+    await learnCalloutColour(from, to);
+  } catch (err) {
+    console.warn("Не удалось определить цвет выносок, беру обычный", err);
+  }
+  if (myRunToken !== activeRunToken) return;
+
   for (let pageNum = from; pageNum <= to; pageNum++) {
     if (myRunToken !== activeRunToken) return; // abandoned - a newer run took over
     setProgress((pageNum - from) / totalPages, `Страница ${pageNum} из ${to} (${from}-${to})`);
@@ -469,11 +487,90 @@ function findBlueBoxes(imgData, width, height) {
       const w = maxX - minX + 1, h = maxY - minY + 1;
       const area = w * h;
       if (w < MIN_BOX_W || h < MIN_BOX_H || area < MIN_BOX_AREA) continue;
+      // a box ON the page, not the page itself — without this the page's own
+      // background colour scores as one perfect rectangle per page
+      if (area > width * height * 0.55) continue;
       if (count / area < 0.5) continue;
+      // and a callout holds drawings: a solid dark blob in an assembly picture
+      // is also a large flat rectangle
+      let content = 0, seen = 0;
+      for (let yy = minY; yy <= maxY; yy += 2) {
+        for (let xx = minX; xx <= maxX; xx += 2, seen++) {
+          const j = (yy * width + xx) * 4;
+          if (Math.max(Math.abs(data[j] - BOX_BG[0]), Math.abs(data[j + 1] - BOX_BG[1]),
+                       Math.abs(data[j + 2] - BOX_BG[2])) > 30) content++;
+        }
+      }
+      if (seen && content / seen < 0.02) continue;
       boxes.push({ x0: minX, y0: minY, x1: maxX, y1: maxY });
     }
   }
   return boxes;
+}
+
+
+// ---------- learning the callout colour ----------
+
+/** Work out what colour THIS booklet fills its parts callouts with.
+ *
+ * Three steps, none of which assume a palette:
+ *   1. tally the colours over a spread of pages — the callout fill is always
+ *      among the handful of most common, though not reliably the second: it is
+ *      third behind white in one booklet and second in another;
+ *   2. try each candidate with the ordinary box finder;
+ *   3. keep the one that behaves like a callout colour — a handful of boxes on
+ *      most pages. The page's own background gives one box covering everything
+ *      (excluded by size), and dark areas of an assembly drawing give none on
+ *      some pages and forty on others.
+ *
+ * Verified on three booklets: it recovers exactly the colour that used to be
+ * hard-coded for the two Super Yacht sets, and finds the different one the
+ * third set uses.
+ */
+async function learnCalloutColour(from, to) {
+  const nPages = to - from + 1;
+  const step = Math.max(1, Math.floor(nPages / 10));
+  const sample = [];
+  for (let p = from; p <= to && sample.length < 10; p += step) sample.push(p);
+  if (!sample.length) return;
+
+  const tally = new Map();
+  const renders = [];
+  for (const pageNum of sample) {
+    const page = await pdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({ scale: LEARN_SCALE });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    renders.push({ img, w: canvas.width, h: canvas.height });
+    const d = img.data;
+    for (let i = 0; i < d.length; i += 4 * 7) {
+      const key = ((d[i] >> 3) << 12) | ((d[i + 1] >> 3) << 6) | (d[i + 2] >> 3);
+      tally.set(key, (tally.get(key) || 0) + 1);
+    }
+  }
+  const candidates = [...tally.entries()].sort((a, b) => b[1] - a[1]).slice(0, 6)
+    .map(([k]) => [((k >> 12) & 63) * 8 + 4, ((k >> 6) & 63) * 8 + 4, (k & 63) * 8 + 4]);
+
+  const was = BOX_BG;
+  let best = null;
+  for (const cand of candidates) {
+    BOX_BG = cand;
+    let credit = 0, total = 0;
+    for (const r of renders) {
+      const n = findBlueBoxes(r.img, r.w, r.h).length;
+      total += n;
+      if (n >= 1 && n <= 5) credit++;
+    }
+    if (!best || credit > best.credit || (credit === best.credit && total > best.total)) {
+      best = { cand, credit, total };
+    }
+  }
+  BOX_BG = best && best.credit > 0 ? best.cand : was;
+  console.log("Цвет выносок этого буклета:", BOX_BG.join(","));
 }
 
 // ---------- item segmentation within a box ----------
