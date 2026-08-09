@@ -13,5 +13,35 @@
   "n_pos": 1971,
   "n_neg": 9810,
   "n_hard": 1323,
-  "passes": true
+  "passes": true,
+  "hand_checked": {
+    "note": "строки, разобранные глазами на двух буклетах; см. groundtruth*.json и regression.py. Дообучение на парах с разным измеренным размером в шипах: было 16 из 21, стало 18 из 21",
+    "settings": {
+      "tol": 0.25,
+      "color_veto": 45,
+      "aspect_veto": 0.15
+    },
+    "booklet_1": {
+      "pairs": 12,
+      "still_merged": 2
+    },
+    "booklet_2": {
+      "pairs": 9,
+      "still_merged": 1
+    },
+    "remaining": "6x6 против 8x8, два скоса разной длины, кубик 1x4 против 1x3"
+  },
+  "stud_census": {
+    "note": "все подписи размера, пересчитанные глазами по контактным листам (studs_sheet.py)",
+    "booklet_1": {
+      "rows": 353,
+      "labels": 53,
+      "correct": 53
+    },
+    "booklet_2": {
+      "rows": 406,
+      "labels": 37,
+      "correct": 37
+    }
+  }
 }
