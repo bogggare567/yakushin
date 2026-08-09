@@ -31,7 +31,7 @@ from regression import bucket_with_vetoes
 from model import IconEmbedder
 
 STUD_MIN_AREA = 20000     # matches webapp/studs.js
-SURE_ERR = 0.08
+SURE_ERR = 0.18   # = FIT_TOL: a lone reading that passed the geometry is trusted
 
 
 def load(pdf, pages, cache):

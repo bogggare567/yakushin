@@ -245,7 +245,13 @@ def measure(icon):
         if err > FIT_TOL:
             continue
         a, b = int(k[0]), int(k[1])
-        if a < 1 or b < 1 or a > MAX_STUDS or b > MAX_STUDS:
+        # Both sides must be at least 2. With a count of 1 the lattice takes
+        # exactly one step in that direction and nothing confirms it — the
+        # answer rests on a single unverified vector. That is how a smooth
+        # white wedge with no studs at all came back "8x1". Real 1xN plates
+        # lose out too, but they were already almost never measurable: one row
+        # of studs gives no second direction to find.
+        if a < 2 or b < 2 or a > MAX_STUDS or b > MAX_STUDS:
             continue
         size = (max(a, b), min(a, b))
         if size not in REAL_SIZES:

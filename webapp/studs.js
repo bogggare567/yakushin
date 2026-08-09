@@ -40,7 +40,13 @@ const STUD_CROP = 256;         // the lattice is read from a centre crop this bi
 const STUD_TOP_PEAKS = 8;      // candidate repeat vectors tried per icon
 const STUD_STRONG_PEAK = 0.20; // a repeat vector must be this much of the best peak
 const STUD_SQUARE_TOL = 0.80;  // the two lattice vectors must be near equal in length
-const STUD_SURE_ERR = 0.08;    // a lone reading is only trusted this close to whole
+// A lone reading is trusted when it passed everything else, and no closer to
+// whole than any other reading has to be. The extra tightening this used to
+// carry cost 11 correct labels across the two booklets — every single one of
+// the withheld single-reading rows turned out to be right — while catching
+// nothing. The geometry ahead of it is the filter: reduced basis, square
+// lattice, explains-the-peaks scoring, whole counts, a real LEGO size.
+const STUD_SURE_ERR = STUD_FIT_TOL;
 
 // Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
 // 1x8, not a discovery — and this number exists to be checked against, so a
@@ -295,7 +301,12 @@ function studMeasure(canvas) {
   // whole numbers is a free check rather than a fitted result. A part that
   // comes out at 16.48 and 0.49 is not a rectangular grid of studs.
   if (err > STUD_FIT_TOL) return null;
-  if (kw < 1 || kl < 1 || kw > STUD_MAX || kl > STUD_MAX) return null;
+  // Both sides must be at least 2. With a count of 1 the lattice takes exactly
+  // one step in that direction and nothing confirms it — the answer rests on a
+  // single unverified vector. That is how a smooth white wedge with no studs
+  // came back "8x1". Real 1xN plates lose out too, but they were already
+  // almost never measurable: one row of studs gives no second direction.
+  if (kw < 2 || kl < 2 || kw > STUD_MAX || kl > STUD_MAX) return null;
   const size = [Math.max(kw, kl), Math.min(kw, kl)];
   if (!STUD_REAL_SIZES.has(`${size[1]}x${size[0]}`)) return null;
   return { size, err };
