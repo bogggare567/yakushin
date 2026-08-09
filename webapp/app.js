@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "3.0.0";
+const APP_VERSION = "3.1.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -34,7 +34,14 @@ const SIZE_K = RENDER_SCALE / SCALE_REF;
 const MIN_BOX_W = 40 * SIZE_K, MIN_BOX_H = 40 * SIZE_K, MIN_BOX_AREA = 400 * SIZE_K * SIZE_K;
 const MIN_COL_GAP = 6 * SIZE_K; // px of background between two item slots
 const MIN_ROW_GAP = 2 * SIZE_K; // px of background rows between icon and qty text
-const MIN_GLYPH_W = 5 * SIZE_K, MIN_GLYPH_H = 8 * SIZE_K; // below this a "glyph" is noise, not a digit
+// A glyph is judged by its HEIGHT, not its width. Digits printed on one line
+// share a height; their widths do not — a "1" is a third as wide as an "8".
+// Requiring 5*SIZE_K of width threw away every "1" in a booklet whose digits
+// are smaller (6540963), and "1x" is the commonest quantity there is, so most
+// of its callouts came back with no number at all.
+const MIN_GLYPH_H = 8 * SIZE_K;
+const MIN_GLYPH_W = 2 * SIZE_K;      // narrower than this is a speck
+const MAX_GLYPH_ASPECT = 1.6;        // wider than tall is not a digit
 const SIG_SIZE = 14; // color-grid signature size (px) used to identify/dedup a part's icon
 const SIG_MARGIN = 2; // border reserved inside SIG_SIZE so small shifts stay in-bounds
 const SIG_MAX_SHIFT = 2; // px of shift tried in each direction when comparing two signatures
@@ -289,6 +296,13 @@ async function runAnalysis() {
     await learnCalloutColour(from, to);
   } catch (err) {
     console.warn("Не удалось определить цвет выносок, беру обычный", err);
+  }
+  if (myRunToken !== activeRunToken) return;
+  setProgress(0, "Разбираюсь, как здесь написаны количества…");
+  try {
+    await learnGlyphs(from, to);
+  } catch (err) {
+    console.warn("Не удалось выучить цифры буклета, беру обычные", err);
   }
   if (myRunToken !== activeRunToken) return;
 
@@ -707,7 +721,15 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
       for (let x = cs; x < ce; x++) { if (fg[y * w + x]) { any = true; break; } }
       rowHasFg.push(any);
     }
-    const gaps = findRuns(rowHasFg.map((v) => !v), MIN_ROW_GAP);
+    // Only gaps with content on BOTH sides can separate the icon from its
+    // quantity. The largest empty run in a slot is usually the padding above
+    // the icon or below the text, and splitting there puts icon and text on
+    // the same side — which is how a booklet with roomier callouts (6540963)
+    // ended up with "1x" baked into the part picture and no quantity read.
+    const first = rowHasFg.indexOf(true);
+    const last = rowHasFg.lastIndexOf(true);
+    const gaps = findRuns(rowHasFg.map((v) => !v), MIN_ROW_GAP)
+      .filter((g) => g[0] > first && g[1] < last);
     if (gaps.length) {
       const best = gaps.reduce((a, b) => (b[1] - b[0] > a[1] - a[0] ? b : a));
       const splitRow = Math.round((best[0] + best[1]) / 2);
@@ -752,6 +774,111 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
   return results;
 }
 
+
+// ---------- learning this booklet's digits ----------
+
+let GLYPH_COLLECTOR = null;   // set during the learning pass, null otherwise
+let LEARNED_GLYPHS = null;    // [{label, bits}] once learned
+let LEARN_REPORT = null;      // what the learning pass saw, for diagnosis
+
+const GLYPH_CLUSTER_DIST = 0.13;   // share of bits that may differ within one shape
+const GLYPH_MIN_CLUSTER = 4;       // shapes seen fewer times than this are noise
+const GLYPH_LABEL_DIST = 0.42;     // how far a clean prototype may sit from a template
+
+function glyphDistance(a, b) {
+  let d = 0;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) d++;
+  return d;
+}
+
+/** Work out what this booklet's digits look like, from the booklet.
+ *
+ * The built-in templates were traced from the Super Yacht booklets. Another set
+ * sets its "2x" in a different face at two thirds the size, and matching a
+ * single small noisy glyph against a foreign template failed on 63% of them.
+ *
+ * But a booklet repeats its digits hundreds of times. Group the shapes that
+ * keep recurring and average each group, and the result is a clean prototype —
+ * which is a far easier thing to recognise than any one instance of it. Two
+ * facts then label the groups without anyone typing anything:
+ *
+ *   the "x" is whichever shape sits last in its group, every time;
+ *   a digit is then matched against the digit templates only, prototype to
+ *   template, where the noise that defeated the per-glyph match is gone.
+ *
+ * A booklet whose digits cannot be grouped this way keeps the built-in
+ * templates, so this can add recognition but never take it away.
+ */
+async function learnGlyphs(from, to) {
+  const nPages = to - from + 1;
+  const step = Math.max(1, Math.floor(nPages / 24));
+  GLYPH_COLLECTOR = [];
+  try {
+    for (let p = from; p <= to && GLYPH_COLLECTOR.length < 900; p += step) {
+      try { await processPage(p); } catch (err) { /* a bad page teaches nothing */ }
+    }
+  } finally {
+    var seen = GLYPH_COLLECTOR;
+    GLYPH_COLLECTOR = null;
+  }
+  if (seen.length < 30) return;
+
+  const maxDist = GLYPH_W * GLYPH_H * GLYPH_CLUSTER_DIST;
+  const clusters = [];
+  for (const g of seen) {
+    let best = null, bestD = Infinity;
+    for (const c of clusters) {
+      const d = glyphDistance(c.rep, g.bits);
+      if (d < bestD) { bestD = d; best = c; }
+    }
+    if (best && bestD <= maxDist) { best.members.push(g); }
+    else clusters.push({ rep: g.bits, members: [g] });
+  }
+
+  const learned = [];
+  for (const c of clusters) {
+    if (c.members.length < GLYPH_MIN_CLUSTER) continue;
+    // the prototype: each pixel set if most instances set it
+    const proto = new Uint8Array(GLYPH_W * GLYPH_H);
+    for (let i = 0; i < proto.length; i++) {
+      let on = 0;
+      for (const m of c.members) on += m.bits[i];
+      proto[i] = on * 2 > c.members.length ? 1 : 0;
+    }
+    const lastShare = c.members.filter((m) => m.last).length / c.members.length;
+    if (lastShare > 0.8) {
+      learned.push({ label: "x", bits: proto, n: c.members.length });
+      continue;
+    }
+    let bestLabel = null, bestD = Infinity;
+    for (const t of TEMPLATES) {
+      if (t.label === "x") continue;          // digits are matched to digits
+      const d = glyphDistance(t.bits, proto);
+      if (d < bestD) { bestD = d; bestLabel = t.label; }
+    }
+    if (bestLabel !== null && bestD <= GLYPH_W * GLYPH_H * GLYPH_LABEL_DIST) {
+      learned.push({ label: bestLabel, bits: proto, n: c.members.length });
+    }
+  }
+  // one shape per label, the one seen most often
+  const byLabel = new Map();
+  for (const l of learned) {
+    const cur = byLabel.get(l.label);
+    if (!cur || l.n > cur.n) byLabel.set(l.label, l);
+  }
+  LEARNED_GLYPHS = byLabel.size >= 2 ? [...byLabel.values()] : null;
+  LEARN_REPORT = {
+    collected: seen.length,
+    clusters: clusters.length,
+    big: clusters.filter((c) => c.members.length >= GLYPH_MIN_CLUSTER)
+                 .map((c) => c.members.length).sort((a, b) => b - a).slice(0, 12),
+  };
+  if (LEARNED_GLYPHS) {
+    console.log("Цифры этого буклета выучены:",
+      LEARNED_GLYPHS.map((l) => `${l.label}×${l.n}`).join(" "));
+  }
+}
+
 // ---------- digit glyph recognition (template matching, no OCR needed) ----------
 
 const TEMPLATES = GLYPH_TEMPLATES.map((t) => ({ label: t.label, bits: unpackHexBits(t.bits, t.n) }));
@@ -791,15 +918,23 @@ function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
   // bounding box and distort the shape; components keep it separate so the
   // size filter below can drop it cleanly.
   const components = findGlyphComponents(fg, w, h)
-    .filter((c) => (c.maxX - c.minX + 1) >= MIN_GLYPH_W && (c.maxY - c.minY + 1) >= MIN_GLYPH_H)
+    .filter((c) => {
+      const gw = c.maxX - c.minX + 1, gh = c.maxY - c.minY + 1;
+      return gh >= MIN_GLYPH_H && gw >= MIN_GLYPH_W && gw <= gh * MAX_GLYPH_ASPECT;
+    })
     .sort((a, b) => a.minX - b.minX);
   if (!components.length) return { qty: null, unsure: true };
 
   let label = "";
   let anyUnsure = false;
-  for (const comp of components) {
-    const { mask, cw, ch } = componentLocalMask(comp, w);
+  for (let ci = 0; ci < components.length; ci++) {
+    const { mask, cw, ch } = componentLocalMask(components[ci], w);
     const normalized = resizeGlyphMask(mask, cw, ch);
+    if (GLYPH_COLLECTOR) {
+      // during the learning pass: keep the shape and whether it sat last in
+      // its group, which is what identifies the "x" without any template
+      GLYPH_COLLECTOR.push({ bits: normalized, last: ci === components.length - 1 });
+    }
     const { bestLabel, bestDist } = classifyGlyph(normalized);
     if (bestDist > GLYPH_MAX_DIST) { anyUnsure = true; continue; }
     label += bestLabel;
@@ -877,7 +1012,11 @@ function resizeGlyphMask(mask, srcW, srcH) {
 
 function classifyGlyph(bits) {
   let bestLabel = "?", bestDist = Infinity;
-  for (const t of TEMPLATES) {
+  // Learned shapes AND the traced ones, never one instead of the other. An
+  // earlier version replaced the templates outright, and a booklet where only
+  // "x" and "2" could be grouped lost every other digit — learning has to be
+  // able to add recognition without taking any away.
+  for (const t of (LEARNED_GLYPHS ? LEARNED_GLYPHS.concat(TEMPLATES) : TEMPLATES)) {
     let d = 0;
     for (let i = 0; i < bits.length; i++) if (bits[i] !== t.bits[i]) d++;
     if (d < bestDist) { bestDist = d; bestLabel = t.label; }
