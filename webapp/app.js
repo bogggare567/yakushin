@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "3.2.1";
+const APP_VERSION = "3.3.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -286,6 +286,7 @@ async function runAnalysis() {
   const buckets = [];
   const pageRecords = [];
   const studItems = [];   // one entry per icon, for the stud-size solve below
+  const allGlyphs = [];   // every digit shape in the document, for learning them
   const totalPages = to - from + 1;
   let pagesWithParts = 0;
 
@@ -299,13 +300,6 @@ async function runAnalysis() {
     console.warn("Не удалось определить цвет выносок, беру обычный", err);
   }
   if (myRunToken !== activeRunToken) return;
-  setProgress(0, "Разбираюсь, как здесь написаны количества…");
-  try {
-    await learnGlyphs(from, to);
-  } catch (err) {
-    console.warn("Не удалось выучить цифры буклета, беру обычные", err);
-  }
-  if (myRunToken !== activeRunToken) return;
 
   for (let pageNum = from; pageNum <= to; pageNum++) {
     if (myRunToken !== activeRunToken) return; // abandoned - a newer run took over
@@ -317,7 +311,15 @@ async function runAnalysis() {
       for (const it of items) {
         const { index: bucketIdx, studs, thumb } = addToBuckets(buckets, it, pageNum);
         const qty = it.qty ?? 1;
-        pageItems.push({ bucketIdx, qty, unsure: it.unsure || it.qty === null, rect: it.rect });
+        // `qty` stays a number for everything downstream; `read` is what says
+        // whether it came from an actual reading, which is what the second
+        // pass needs to know and what `unsure` alone cannot express
+        pageItems.push({ bucketIdx, qty, read: it.qty !== null,
+                         unsure: it.unsure || it.qty === null,
+                         rect: it.rect, glyphs: it.glyphs });
+        for (let gi = 0; gi < (it.glyphs || []).length; gi++) {
+          allGlyphs.push({ bits: it.glyphs[gi], last: gi === it.glyphs.length - 1 });
+        }
         if (studs) {
           studItems.push({
             row: bucketIdx, size: studs.size, err: studs.err,
@@ -335,6 +337,16 @@ async function runAnalysis() {
   }
 
   if (myRunToken !== activeRunToken) return; // abandoned while the loop ran
+
+  // Now that every page has been seen, the booklet's own digits can be learned
+  // from all of them at once and the quantities read again.
+  try {
+    learnGlyphs(allGlyphs);
+    const gained = rereadQuantities(pageRecords, buckets);
+    if (gained) console.log(`Со своими цифрами прочитано ещё ${gained} количеств`);
+  } catch (err) {
+    console.warn("Не удалось перечитать количества", err);
+  }
 
   applyStudSizes(buckets, studItems, pageRecords);
 
@@ -851,6 +863,7 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
       imgCanvas,
       qty: qtyResult.qty,
       unsure: qtyResult.unsure,
+      glyphs: qtyResult.shapes || [],
       rect: { x: x0 + cs, y: y0 + r0, w: ce - cs, h: slotH },
     });
   }
@@ -893,18 +906,7 @@ function glyphDistance(a, b) {
  * A booklet whose digits cannot be grouped this way keeps the built-in
  * templates, so this can add recognition but never take it away.
  */
-async function learnGlyphs(from, to) {
-  const nPages = to - from + 1;
-  const step = Math.max(1, Math.floor(nPages / 24));
-  GLYPH_COLLECTOR = [];
-  try {
-    for (let p = from; p <= to && GLYPH_COLLECTOR.length < 900; p += step) {
-      try { await processPage(p); } catch (err) { /* a bad page teaches nothing */ }
-    }
-  } finally {
-    var seen = GLYPH_COLLECTOR;
-    GLYPH_COLLECTOR = null;
-  }
+function learnGlyphs(seen) {
   if (seen.length < 30) return;
 
   const maxDist = GLYPH_W * GLYPH_H * GLYPH_CLUSTER_DIST;
@@ -915,7 +917,7 @@ async function learnGlyphs(from, to) {
       const d = glyphDistance(c.rep, g.bits);
       if (d < bestD) { bestD = d; best = c; }
     }
-    if (best && bestD <= maxDist) { best.members.push(g); }
+    if (best && bestD <= maxDist) best.members.push(g);
     else clusters.push({ rep: g.bits, members: [g] });
   }
 
@@ -944,29 +946,69 @@ async function learnGlyphs(from, to) {
     // Close to one digit is not enough — it has to be clearly closer to that
     // one than to any other. A prototype that is merely nearest gets labelled
     // confidently and then misreads every quantity it appears in, which is how
-    // a booklet ended up learning "4" and "8" for digits that were neither.
+    // a booklet came to learn "4" and "8" for digits that were neither.
     if (bestLabel !== null && bestD <= GLYPH_W * GLYPH_H * GLYPH_LABEL_DIST
         && bestD <= runnerUp * GLYPH_LABEL_MARGIN) {
       learned.push({ label: bestLabel, bits: proto, n: c.members.length });
     }
   }
-  // one shape per label, the one seen most often
   const byLabel = new Map();
   for (const l of learned) {
     const cur = byLabel.get(l.label);
     if (!cur || l.n > cur.n) byLabel.set(l.label, l);
   }
   LEARNED_GLYPHS = byLabel.size >= 2 ? [...byLabel.values()] : null;
-  LEARN_REPORT = {
-    collected: seen.length,
-    clusters: clusters.length,
-    big: clusters.filter((c) => c.members.length >= GLYPH_MIN_CLUSTER)
-                 .map((c) => c.members.length).sort((a, b) => b - a).slice(0, 12),
-  };
   if (LEARNED_GLYPHS) {
     console.log("Цифры этого буклета выучены:",
       LEARNED_GLYPHS.map((l) => `${l.label}×${l.n}`).join(" "));
   }
+}
+
+/** Read every quantity again, now that the booklet's own digits are known.
+ *
+ * The glyphs were kept as the pages went by, so this costs no rendering and no
+ * second look at the PDF — it is the same shapes, classified against better
+ * prototypes. Items that failed the first time get their number, and items
+ * that succeeded are left alone unless the new reading disagrees.
+ */
+function rereadQuantities(pageRecords, buckets) {
+  if (!LEARNED_GLYPHS) return 0;
+  let gained = 0;
+  for (const rec of pageRecords) {
+    for (const it of rec.items) {
+      // Only fill in what was missed. Overwriting a reading that already
+      // worked cost 6540963 a quarter of its parts — learning is allowed to
+      // add recognition and never to replace it, the same rule the learned
+      // templates follow.
+      if (it.read || !it.glyphs || !it.glyphs.length) continue;
+      let label = "", unsure = false;
+      for (const bits of it.glyphs) {
+        const { bestLabel, bestDist } = classifyGlyph(bits);
+        if (bestDist > GLYPH_MAX_DIST) { unsure = true; continue; }
+        label += bestLabel;
+      }
+      const digits = label.replace(/x+$/i, "");
+      if (!/^\d+$/.test(digits)) continue;
+      const value = parseInt(digits, 10);
+      if (value < 1 || value > MAX_PLAUSIBLE_QTY) continue;
+      gained++;
+      it.qty = value;
+      it.read = true;
+      it.unsure = unsure;
+    }
+  }
+  // counts are rebuilt from the items rather than patched, so a re-read can
+  // only ever leave the totals consistent with what each page says
+  for (const b of buckets) { b.count = 0; b.unsure = false; }
+  for (const rec of pageRecords) {
+    for (const it of rec.items) {
+      const b = buckets[it.bucketIdx];
+      if (!b) continue;
+      if (!it.read) { b.unsure = true; b.count += 1; }
+      else { b.count += it.qty; if (it.unsure) b.unsure = true; }
+    }
+  }
+  return gained;
 }
 
 // ---------- digit glyph recognition (template matching, no OCR needed) ----------
@@ -988,7 +1030,7 @@ function unpackHexBits(hexstr, n) {
 
 function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
   const w = ce - cs, h = rowEnd - rowStart + 1;
-  if (w <= 0 || h <= 0) return { qty: null, unsure: true };
+  if (w <= 0 || h <= 0) return { qty: null, unsure: true, shapes: [] };
   const local = new Uint8ClampedArray(w * h * 4);
   const src = subData.data;
   for (let y = 0; y < h; y++) {
@@ -1013,18 +1055,19 @@ function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
       return gh >= MIN_GLYPH_H && gw >= MIN_GLYPH_W && gw <= gh * MAX_GLYPH_ASPECT;
     })
     .sort((a, b) => a.minX - b.minX);
-  if (!components.length) return { qty: null, unsure: true };
+  if (!components.length) return { qty: null, unsure: true, shapes: [] };
 
   let label = "";
   let anyUnsure = false;
+  const shapes = [];
   for (let ci = 0; ci < components.length; ci++) {
     const { mask, cw, ch } = componentLocalMask(components[ci], w);
     const normalized = resizeGlyphMask(mask, cw, ch);
-    if (GLYPH_COLLECTOR) {
-      // during the learning pass: keep the shape and whether it sat last in
-      // its group, which is what identifies the "x" without any template
-      GLYPH_COLLECTOR.push({ bits: normalized, last: ci === components.length - 1 });
-    }
+    // Kept for the second pass. Every page's glyphs are gathered as the pages
+    // go by and the digits learned from all of them at the end — an earlier
+    // version sampled two dozen pages up front and collected 169 shapes, which
+    // is too few to average a clean prototype out of.
+    shapes.push(normalized);
     const { bestLabel, bestDist } = classifyGlyph(normalized);
     if (bestDist > GLYPH_MAX_DIST) { anyUnsure = true; continue; }
     label += bestLabel;
@@ -1032,14 +1075,14 @@ function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
 
   // drop trailing "x" marker(s); keep only leading digits
   const digits = label.replace(/x+$/i, "");
-  if (!/^\d+$/.test(digits)) return { qty: null, unsure: true };
+  if (!/^\d+$/.test(digits)) return { qty: null, unsure: true, shapes };
   const value = parseInt(digits, 10);
   // A callout asks for a handful of a part, never thousands. Misread digits
   // used to sail through and be added up: one grey booklet totalled 732145
   // parts. An implausible number is a failed read, and saying so is far better
   // than reporting it.
-  if (value < 1 || value > MAX_PLAUSIBLE_QTY) return { qty: null, unsure: true };
-  return { qty: value, unsure: anyUnsure };
+  if (value < 1 || value > MAX_PLAUSIBLE_QTY) return { qty: null, unsure: true, shapes };
+  return { qty: value, unsure: anyUnsure, shapes };
 }
 
 // 8-connected flood fill so a diagonally-touching antialiased stroke still
