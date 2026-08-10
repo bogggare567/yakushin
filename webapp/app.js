@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "3.3.0";
+const APP_VERSION = "3.4.1";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -26,6 +26,18 @@ const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slo
 // flood-filled the whole page and reported one "part" per page. The default
 // below is only the fallback for a document the learner cannot read.
 let BOX_BG = [215, 238, 254];
+
+// What the icons inside the callout currently being read sit on. Usually the
+// box's own fill and the same as ACTIVE_BG — but one booklet draws its callouts as
+// a bare white frame with the page's own grey showing through the middle, and
+// there the icons sit on grey while the thing that marks the callout is white.
+// Set per box while that box is being read, restored after.
+let ACTIVE_BG = BOX_BG;
+
+// What a real parts callout has behind its parts in this booklet. Null until
+// learned, and null means "accept any box", which is what the two booklets
+// where fill and interior are the same colour need.
+let INNER_BG = null;
 const LEARN_SCALE = 1.5; // pages are rendered small for the colour survey
 const BOX_COLOR_TOL = 14; // tolerance for matching the box background color
 const FG_DIFF_THRESHOLD = 35; // per-pixel max-channel diff to count as foreground (icon/text) inside a box
@@ -309,7 +321,12 @@ async function runAnalysis() {
       if (items.length) pagesWithParts++;
       const pageItems = [];
       for (const it of items) {
+        // the signature is measured against the same background the icon was
+        // cut out of, which is not the same for every box in every booklet
+        const wasBg2 = ACTIVE_BG;
+        ACTIVE_BG = it.bg || BOX_BG;
         const { index: bucketIdx, studs, thumb } = addToBuckets(buckets, it, pageNum);
+        ACTIVE_BG = wasBg2;
         const qty = it.qty ?? 1;
         // `qty` stays a number for everything downstream; `read` is what says
         // whether it came from an actual reading, which is what the second
@@ -419,7 +436,18 @@ async function processPage(pageNum) {
   const boxes = findBlueBoxes(full, canvas.width, canvas.height);
 
   const items = [];
-  boxes.forEach((box, bi) => {
+  const wasBg = ACTIVE_BG;
+  // panels that do not have what a parts callout has behind its parts — the
+  // "what you built so far" pictures, which are the same colour and a
+  // different thing
+  const parts = INNER_BG
+    ? boxes.filter((b) => Math.max(Math.abs(b.inner[0] - INNER_BG[0]),
+                                   Math.abs(b.inner[1] - INNER_BG[1]),
+                                   Math.abs(b.inner[2] - INNER_BG[2])) <= 14)
+    : boxes;
+  parts.forEach((box, bi) => {
+    // read this box against what is actually inside it
+    ACTIVE_BG = box.inner || BOX_BG;
     const boxItems = extractBoxItems(canvas, ctx, box);
     // Studs are measured here, per box, rather than per icon later: every icon
     // inside one box is drawn at the same scale by the same camera, so one
@@ -432,10 +460,12 @@ async function processPage(pageNum) {
     boxItems.forEach((it, k) => {
       it.boxIdx = bi;
       it.cropped = crops[k];
+      it.bg = ACTIVE_BG;
       it.studs = lattice ? studSolve(preps[k], lattice) : null;
       items.push(it);
     });
   });
+  ACTIVE_BG = wasBg;
   // store positions as fractions of the page, so the highlight lands correctly
   // whatever size the page image is displayed at
   for (const it of items) {
@@ -517,7 +547,12 @@ function findBlueBoxes(imgData, width, height) {
       // a box ON the page, not the page itself — without this the page's own
       // background colour scores as one perfect rectangle per page
       if (area > width * height * 0.55) continue;
-      if (count / area < 0.5) continue;
+      // Two shapes count, because booklets draw callouts both ways: a filled
+      // panel, or a bare rectangular FRAME. One set outlines its callouts in
+      // thin white and lets the page's own grey show through the middle —
+      // there is no fill to find, and looking for one missed every parts
+      // callout in the book.
+      if (count / area < 0.5 && !isFrame(mask, width, minX, minY, maxX, maxY)) continue;
       // and a callout holds drawings: a solid dark blob in an assembly picture
       // is also a large flat rectangle
       let content = 0, seen = 0;
@@ -529,7 +564,8 @@ function findBlueBoxes(imgData, width, height) {
         }
       }
       if (seen && content / seen < 0.02) continue;
-      boxes.push({ x0: minX, y0: minY, x1: maxX, y1: maxY });
+      boxes.push({ x0: minX, y0: minY, x1: maxX, y1: maxY,
+                   inner: innerBackground(data, width, { x0: minX, y0: minY, x1: maxX, y1: maxY }) });
     }
   }
   return boxes;
@@ -680,6 +716,104 @@ async function learnCalloutColour(from, to) {
               Math.round(best.b / best.area)];
   }
   console.log("Цвет выносок этого буклета:", BOX_BG.join(","));
+  await learnInnerBackground(from, to);
+}
+
+/** What is behind the parts inside a callout, in THIS booklet.
+ *
+ * Usually the same as the colour that marks the callout. But one set draws its
+ * callouts as a bare white frame with the page's own grey inside, and uses the
+ * very same white, filled, for the "here is what you built so far" panels. On
+ * colour alone those are the same thing; on what is inside them they are not,
+ * and a booklet is consistent about it. So the interior is learned too, and a
+ * panel that does not match is not a parts callout.
+ */
+async function learnInnerBackground(from, to) {
+  const nPages = to - from + 1;
+  const step = Math.max(1, Math.floor(nPages / 8));
+  const tally = new Map();
+  for (let pageNum = from; pageNum <= to; pageNum += step) {
+    const page = await pdfDoc.getPage(pageNum);
+    const viewport = page.getViewport({ scale: RENDER_SCALE });
+    const canvas = document.createElement("canvas");
+    canvas.width = Math.ceil(viewport.width);
+    canvas.height = Math.ceil(viewport.height);
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    await page.render({ canvasContext: ctx, viewport }).promise;
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const wasBg = ACTIVE_BG;
+    for (const box of findBlueBoxes(img, canvas.width, canvas.height)) {
+      // Which of these panels is a PARTS callout is not a question about
+      // colour — it is whether the panel says how many. A "what you built so
+      // far" picture is the same white rectangle and never carries a "2x".
+      // Taking the commonest interior instead picked the panels, threw out the
+      // real callouts, and cut a booklet from 199 icons to 61.
+      ACTIVE_BG = box.inner;
+      let withQty = 0;
+      try {
+        for (const it of extractBoxItems(canvas, ctx, box)) if (it.qty !== null) withQty++;
+      } catch (err) { /* a box that cannot be cut up teaches nothing */ }
+      if (!withQty) continue;
+      const c = box.inner;
+      const key = ((c[0] >> 3) << 12) | ((c[1] >> 3) << 6) | (c[2] >> 3);
+      let a = tally.get(key);
+      if (!a) tally.set(key, (a = { n: 0, r: 0, g: 0, b: 0 }));
+      a.n += withQty;
+      a.r += c[0] * withQty; a.g += c[1] * withQty; a.b += c[2] * withQty;
+    }
+    ACTIVE_BG = wasBg;
+  }
+  let best = null;
+  for (const a of tally.values()) if (!best || a.n > best.n) best = a;
+  INNER_BG = best && best.n >= 4
+    ? [Math.round(best.r / best.n), Math.round(best.g / best.n), Math.round(best.b / best.n)]
+    : null;
+  if (INNER_BG) console.log("Фон внутри выносок:", INNER_BG.join(","));
+}
+
+
+/** Does this component run along all four edges of its own bounding box?
+ *
+ * That is what a drawn rectangle looks like when only its outline is coloured:
+ * almost nothing inside, but a near-continuous line around the outside.
+ */
+function isFrame(mask, width, minX, minY, maxX, maxY) {
+  const need = 0.7;
+  let top = 0, bottom = 0, left = 0, right = 0;
+  for (let x = minX; x <= maxX; x++) {
+    if (mask[minY * width + x]) top++;
+    if (mask[maxY * width + x]) bottom++;
+  }
+  for (let y = minY; y <= maxY; y++) {
+    if (mask[y * width + minX]) left++;
+    if (mask[y * width + maxX]) right++;
+  }
+  const cols = maxX - minX + 1, rows = maxY - minY + 1;
+  return top / cols >= need && bottom / cols >= need
+      && left / rows >= need && right / rows >= need;
+}
+
+/** The colour the icons inside this box actually sit on.
+ *
+ * Usually the box's own fill; for a frame-style callout it is the page showing
+ * through. Whatever most of the inside is, which needs no assumption about
+ * which of the two kinds this box is.
+ */
+function innerBackground(data, width, box) {
+  const bins = new Map();
+  for (let y = box.y0 + 3; y <= box.y1 - 3; y += 2) {
+    for (let x = box.x0 + 3; x <= box.x1 - 3; x += 2) {
+      const i = (y * width + x) * 4;
+      const key = ((data[i] >> 3) << 12) | ((data[i + 1] >> 3) << 6) | (data[i + 2] >> 3);
+      let a = bins.get(key);
+      if (!a) bins.set(key, (a = [0, 0, 0, 0]));
+      a[0]++; a[1] += data[i]; a[2] += data[i + 1]; a[3] += data[i + 2];
+    }
+  }
+  let top = null;
+  for (const a of bins.values()) if (!top || a[0] > top[0]) top = a;
+  return top ? [Math.round(top[1] / top[0]), Math.round(top[2] / top[0]),
+                Math.round(top[3] / top[0])] : BOX_BG.slice();
 }
 
 // ---------- item segmentation within a box ----------
@@ -687,9 +821,9 @@ async function learnCalloutColour(from, to) {
 function diffMask(data, w, h, threshold) {
   const raw = new Uint8Array(w * h);
   for (let i = 0, p = 0; i < data.length; i += 4, p++) {
-    const dr = Math.abs(data[i] - BOX_BG[0]);
-    const dg = Math.abs(data[i + 1] - BOX_BG[1]);
-    const db = Math.abs(data[i + 2] - BOX_BG[2]);
+    const dr = Math.abs(data[i] - ACTIVE_BG[0]);
+    const dg = Math.abs(data[i + 1] - ACTIVE_BG[1]);
+    const db = Math.abs(data[i + 2] - ACTIVE_BG[2]);
     raw[p] = Math.max(dr, dg, db) > threshold ? 1 : 0;
   }
   return raw;
@@ -1172,9 +1306,9 @@ function autocropCanvas(canvas) {
   for (let y = 0; y < height; y++) {
     for (let x = 0; x < width; x++) {
       const i = (y * width + x) * 4;
-      const dr = Math.abs(data[i] - BOX_BG[0]);
-      const dg = Math.abs(data[i + 1] - BOX_BG[1]);
-      const db = Math.abs(data[i + 2] - BOX_BG[2]);
+      const dr = Math.abs(data[i] - ACTIVE_BG[0]);
+      const dg = Math.abs(data[i + 1] - ACTIVE_BG[1]);
+      const db = Math.abs(data[i + 2] - ACTIVE_BG[2]);
       if (Math.max(dr, dg, db) > FG_DIFF_THRESHOLD) {
         if (x < minX) minX = x;
         if (x > maxX) maxX = x;
@@ -1224,7 +1358,7 @@ function computeSignature(canvas) {
   let fgCount = 0;
   for (let i = 0; i < odata.length; i += 4) {
     const r = odata[i], g = odata[i + 1], b = odata[i + 2];
-    const dr = Math.abs(r - BOX_BG[0]), dg = Math.abs(g - BOX_BG[1]), db = Math.abs(b - BOX_BG[2]);
+    const dr = Math.abs(r - ACTIVE_BG[0]), dg = Math.abs(g - ACTIVE_BG[1]), db = Math.abs(b - ACTIVE_BG[2]);
     if (Math.max(dr, dg, db) <= FG_DIFF_THRESHOLD) continue;
     fgCount++;
     fgPixels.push(r, g, b);
@@ -1235,7 +1369,7 @@ function computeSignature(canvas) {
   }
   let avgColor;
   if (fgCount === 0) {
-    avgColor = [BOX_BG[0], BOX_BG[1], BOX_BG[2]];
+    avgColor = [ACTIVE_BG[0], ACTIVE_BG[1], ACTIVE_BG[2]];
   } else {
     let best = null;
     for (const entry of bins.values()) if (!best || entry.n > best.n) best = entry;
@@ -1261,7 +1395,7 @@ function computeSignature(canvas) {
   const norm = document.createElement("canvas");
   norm.width = SIG_SIZE; norm.height = SIG_SIZE;
   const nctx = norm.getContext("2d");
-  nctx.fillStyle = `rgb(${BOX_BG[0]},${BOX_BG[1]},${BOX_BG[2]})`;
+  nctx.fillStyle = `rgb(${ACTIVE_BG[0]},${ACTIVE_BG[1]},${ACTIVE_BG[2]})`;
   nctx.fillRect(0, 0, SIG_SIZE, SIG_SIZE);
   nctx.imageSmoothingEnabled = true;
   const ox = Math.floor((SIG_SIZE - nw) / 2), oy = Math.floor((SIG_SIZE - nh) / 2);
@@ -1272,7 +1406,7 @@ function computeSignature(canvas) {
   const fgGrid = new Uint8Array(SIG_SIZE * SIG_SIZE);
   for (let p = 0, i = 0; p < SIG_SIZE * SIG_SIZE; p++, i += 4) {
     grid[p * 3] = data[i]; grid[p * 3 + 1] = data[i + 1]; grid[p * 3 + 2] = data[i + 2];
-    const dr = Math.abs(data[i] - BOX_BG[0]), dg = Math.abs(data[i + 1] - BOX_BG[1]), db = Math.abs(data[i + 2] - BOX_BG[2]);
+    const dr = Math.abs(data[i] - ACTIVE_BG[0]), dg = Math.abs(data[i + 1] - ACTIVE_BG[1]), db = Math.abs(data[i + 2] - ACTIVE_BG[2]);
     fgGrid[p] = Math.max(dr, dg, db) > FG_DIFF_THRESHOLD ? 1 : 0;
   }
   // log(w/h) rather than w/h: a ratio, so the same slack means the same thing

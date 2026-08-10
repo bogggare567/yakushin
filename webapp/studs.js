@@ -124,8 +124,8 @@ function studPrepare(canvas) {
   for (let y = 0, p = 0; y < h; y++) {
     for (let x = 0; x < w; x++, p++) {
       const i = p * 4;
-      const d = Math.max(Math.abs(data[i] - BOX_BG[0]), Math.abs(data[i + 1] - BOX_BG[1]),
-                         Math.abs(data[i + 2] - BOX_BG[2]));
+      const d = Math.max(Math.abs(data[i] - ACTIVE_BG[0]), Math.abs(data[i + 1] - ACTIVE_BG[1]),
+                         Math.abs(data[i + 2] - ACTIVE_BG[2]));
       if (d <= FG_DIFF_THRESHOLD) continue;
       const v = 0.299 * data[i] + 0.587 * data[i + 1] + 0.114 * data[i + 2];
       lum[p] = v; fg[p] = 1; sum += v; n++;

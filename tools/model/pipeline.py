@@ -30,6 +30,33 @@ def diff_mask(img, threshold=FG_DIFF_THRESHOLD):
     return np.max(np.abs(img.astype(int) - BOX_BG), axis=-1) > threshold
 
 
+def box_background(img, box):
+    """What the icons inside this box sit on.
+
+    Usually the box's own fill, but for a booklet that draws callouts as a bare
+    frame it is the page colour showing through. Either way it is whatever most
+    of the inside is, which needs no assumption about which of the two it is.
+    """
+    x0, y0, x1, y1 = box
+    inner = img[y0 + 3:y1 - 2, x0 + 3:x1 - 2]
+    if inner.size == 0:
+        return None
+    flat = inner.reshape(-1, 3).astype(np.int32)
+    key = (flat[:, 0] >> 3) * 4096 + (flat[:, 1] >> 3) * 64 + (flat[:, 2] >> 3)
+    vals, counts = np.unique(key, return_counts=True)
+    sel = key == vals[int(np.argmax(counts))]
+    return flat[sel].mean(axis=0)
+
+
+def _page_background(img, step=9):
+    """The colour most of the page is, so we can tell what shows through."""
+    flat = img[::step, ::step].reshape(-1, 3).astype(np.int32)
+    key = (flat[:, 0] >> 3) * 4096 + (flat[:, 1] >> 3) * 64 + (flat[:, 2] >> 3)
+    vals, counts = np.unique(key, return_counts=True)
+    sel = key == vals[int(np.argmax(counts))]
+    return flat[sel].mean(axis=0)
+
+
 def find_blue_boxes(img, scale=RENDER_SCALE):
     k = _size_k(scale)
     min_w, min_h, min_area = 40 * k, 40 * k, 400 * k * k
@@ -49,7 +76,16 @@ def find_blue_boxes(img, scale=RENDER_SCALE):
             continue
         if bw * bh > max_area:
             continue
-        if int((lab[sl] == i).sum()) / (bw * bh) < 0.5:
+        # Two shapes count as a callout, because booklets draw them both ways:
+        # a filled panel, or a bare rectangular FRAME. One set draws its
+        # callouts as a thin white outline with the page's own grey showing
+        # through the middle — there is no fill to find at all, and looking for
+        # one missed every parts callout in the book.
+        comp = lab[sl] == i
+        filled = comp.mean() >= 0.5
+        edges = (comp[0].mean(), comp[-1].mean(), comp[:, 0].mean(), comp[:, -1].mean())
+        frame = min(edges) >= 0.7
+        if not (filled or frame):
             continue
         # A callout holds drawings. A solid dark blob in an assembly picture is
         # also a large flat rectangle, and without this it passes — which is
