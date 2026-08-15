@@ -15,7 +15,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = "vendor/pdf.worker.min.js";
 // page 10 still reads [2,4,2,2] - the long-standing ground truth for it.
 const PDF_LOAD_OPTS = { disableFontFace: true };
 
-const APP_VERSION = "3.4.1";
+const APP_VERSION = "3.6.0";
 const VERSION_CHECK_URL = "https://raw.githubusercontent.com/bogggare567/yakushin/main/webapp/version.json";
 
 const RENDER_SCALE = 3.0; // px per pdf point - higher = crisper thumbnails, slower processing
@@ -148,6 +148,15 @@ let localRangeEditInProgress = false; // true while "Изменить диапа
 // Pages, file://, vanilla `python -m http.server`) has no such API, so this
 // stays fully inert there - detectSync() below just fails quietly.
 let syncAvailable = false;
+
+// This device is a remote control, not a second copy of the app. It arrives
+// here by scanning the QR on the computer, and from then on it shows the list
+// the computer produced and lets you tick parts off. It never receives the PDF
+// and never does the work again — the phone used to download the file and
+// re-analyse all 400 pages on a phone CPU, which is slow, hot, and pointless
+// when the computer next to it has already finished.
+const IS_REMOTE = new URLSearchParams(location.search).has("remote");
+let lastResultsVersion = -1;
 let suppressSyncPush = false;
 let lastSyncedStateVersion = -1;
 let lastLoadedPdfVersion = -1;
@@ -392,7 +401,66 @@ async function runAnalysis() {
   // waiting on a metadata write that might be queued behind the file write.
   saveSessionMeta();
   renderLibrary();
+  pushResults();
   analyzeBtn.disabled = false;
+}
+
+// ---------- the computer publishes, the phone reads ----------
+
+/** Publish the finished list so a phone can show it without the PDF.
+ *
+ * Only the rows a person needs to shop from: the picture, how many, which
+ * pages, the size in studs. Not the page images and not the file — a phone on
+ * the same Wi-Fi is a remote control for a job the computer has already done.
+ */
+async function pushResults() {
+  if (!syncAvailable || IS_REMOTE || !state.buckets.length) return;
+  try {
+    await fetch("/api/results", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: currentPdfName,
+        from: state.from, to: state.to,
+        rows: state.buckets.map((b) => ({
+          t: b.thumbUrl, c: b.count, u: !!b.unsure,
+          p: Array.from(b.pages).sort((x, y) => x - y),
+          s: b.studSize || null,
+          // the dominant colour travels too: the default view groups the list
+          // by colour, and without it the remote rendered nothing at all
+          a: b.avgColor,
+        })),
+      }),
+    });
+  } catch (e) {
+    // the phone just keeps whatever it had; nothing here is worth failing over
+  }
+}
+
+/** Take the computer's finished list and show it. Nothing is recomputed. */
+function adoptResults(payload) {
+  if (!payload || !payload.rows) return;
+  state.buckets = payload.rows.map((r) => ({
+    thumbUrl: r.t, count: r.c, unsure: r.u,
+    pages: new Set(r.p || []), studSize: r.s || null,
+    avgColor: r.a || [128, 128, 128],
+  }));
+  state.pageRecords = [];          // page pictures stay on the computer
+  state.from = payload.from;
+  state.to = payload.to;
+  currentPdfName = payload.name || "";
+  setupPanelEl.hidden = true;
+  viewControls.hidden = false;
+  sessionHeaderEl.hidden = false;
+  sessionTitleEl.textContent = payload.name
+    ? `${payload.name} — стр. ${payload.from}–${payload.to}`
+    : "Список деталей";
+  // straight to the list: setMode would also push state back and try to save a
+  // session, and a remote has neither to give
+  state.mode = "list";
+  resultsEl.hidden = false;
+  stepModeEl.hidden = true;
+  render();
 }
 
 // crypto.randomUUID() only works in a "secure context" (HTTPS or localhost)
@@ -1985,7 +2053,10 @@ function makePartCard(bucket, qty, unsure, pages, bucketIdx) {
     if (state.collected.has(bucketIdx)) state.collected.delete(bucketIdx);
     else state.collected.add(bucketIdx);
     card.classList.toggle("collected", state.collected.has(bucketIdx));
-    saveSessionMeta();
+    // ticking is the one thing a remote control is really for, so it has to
+    // reach the other device immediately rather than at the next navigation
+    pushSyncState();
+    if (!IS_REMOTE) saveSessionMeta();
   });
 
   card.addEventListener("click", () => openPartPages(bucketIdx));
@@ -2000,6 +2071,16 @@ function makePartCard(bucket, qty, unsure, pages, bucketIdx) {
 let partViewer = null; // { bucketIdx, entries: [{pageNum, rect, qty}], index }
 
 function openPartPages(bucketIdx) {
+  if (IS_REMOTE) {
+    // The page images live on the computer with the PDF. Rather than ship
+    // hundreds of them over Wi-Fi for a glance, the remote names the pages and
+    // the computer shows them.
+    const b = state.buckets[bucketIdx];
+    const pages = b ? Array.from(b.pages).sort((x, y) => x - y).join(", ") : "";
+    alert(pages ? `Эта деталь на страницах: ${pages}\n\nСами страницы смотрите на компьютере.`
+                : "Страницы этой детали известны только на компьютере.");
+    return;
+  }
   const bucket = state.buckets[bucketIdx];
   if (!bucket) return;
   const entries = [];
@@ -2611,15 +2692,46 @@ function isLanAddress() {
 }
 
 function initLanBanner() {
-  if (!isLanAddress()) return;
+  // Only the computer offers the QR. The phone that scanned it is the slave in
+  // this pair and has nothing to hand on; showing it a "share" button invites
+  // a second phone to become a third copy of a job already done once.
+  if (IS_REMOTE || !isLanAddress()) return;
   lanBanner.hidden = false;
+}
+
+/** Strip the interface down to what a remote control is for.
+ *
+ * No file picker, no session library, no QR: this device did not open anything
+ * and cannot start a session. It shows the computer's list, and taps on it
+ * travel back. Everything hidden here is hidden because it would either do
+ * nothing or start work that belongs on the other machine.
+ */
+function initRemoteUi() {
+  if (!IS_REMOTE) return;
+  document.body.classList.add("is-remote");
+  const modeToggle = document.querySelector(".mode-toggle");
+  if (modeToggle) modeToggle.hidden = true;   // step mode needs the page images
+  setupPanelEl.hidden = true;
+  lanBanner.hidden = true;
+  const sidebar = document.getElementById("sidebar");
+  if (sidebar) sidebar.hidden = true;
+  const changeRange = document.getElementById("change-range-btn");
+  if (changeRange) changeRange.hidden = true;
+  sessionHeaderEl.hidden = false;
+  sessionTitleEl.textContent = "Жду список с компьютера…";
+  resultsEl.innerHTML = '<div class="empty-hint">Телефон работает как пульт: '
+    + 'список считает компьютер, здесь его видно и можно отмечать найденное.</div>';
 }
 
 async function showQr() {
   await loadQrLib();
   // The QR always encodes the address this page is actually served on, so
   // scanning it is guaranteed to work right now.
-  const url = location.href;
+  // The phone that scans this is a remote control, and says so in the link —
+  // that is what stops it downloading the PDF and grinding through it again.
+  const u = new URL(location.href);
+  u.searchParams.set("remote", "1");
+  const url = u.toString();
   const qr = window.qrcode(0, "M");
   qr.addData(url);
   qr.make();
@@ -2650,6 +2762,7 @@ qrClose.addEventListener("click", () => { qrOverlay.hidden = true; });
 qrOverlay.addEventListener("click", (e) => { if (e.target === qrOverlay) qrOverlay.hidden = true; });
 
 initLanBanner();
+initRemoteUi();
 renderLibrary();
 loadPartModel();   // fetch the part-recognition model in the background
 
@@ -2696,6 +2809,7 @@ function syncPayload() {
     mode: state.mode,
     sortMode: state.sortMode,
     stepIndex: state.stepIndex,
+    collected: Array.from(state.collected || []),
   };
 }
 
@@ -2750,20 +2864,43 @@ async function detectSync() {
 
 async function syncTick() {
   try {
-    const [stateRes, metaRes] = await Promise.all([
+    const [stateRes, metaRes, resMetaRes] = await Promise.all([
       fetch("/api/state", { cache: "no-store" }),
-      fetch("/api/pdf/meta", { cache: "no-store" }),
+      IS_REMOTE ? Promise.resolve(null) : fetch("/api/pdf/meta", { cache: "no-store" }),
+      IS_REMOTE ? fetch("/api/results/meta", { cache: "no-store" }) : Promise.resolve(null),
     ]);
     const stateData = stateRes.ok ? await stateRes.json() : null;
-    const meta = metaRes.ok ? await metaRes.json() : null;
+    const meta = metaRes && metaRes.ok ? await metaRes.json() : null;
     const d = (stateData && stateData.data) || {};
 
-    if (meta && meta.hasFile && meta.version !== lastLoadedPdfVersion) {
+    if (IS_REMOTE && resMetaRes && resMetaRes.ok) {
+      const rm = await resMetaRes.json();
+      if (rm.hasResults && rm.version !== lastResultsVersion) {
+        const r = await fetch("/api/results", { cache: "no-store" });
+        if (r.ok) {
+          const body = await r.json();
+          lastResultsVersion = body.version;
+          adoptResults(body.data);
+        }
+      }
+    }
+
+    // A remote never takes the file. It is here to show what the computer
+    // worked out, not to work it out again on a phone.
+    if (!IS_REMOTE && meta && meta.hasFile && meta.version !== lastLoadedPdfVersion) {
       await adoptSyncedPdf(meta, d);
     }
 
     if (stateData && stateData.version > lastSyncedStateVersion) {
       lastSyncedStateVersion = stateData.version;
+      if (Array.isArray(d.collected)) {
+        const mine = Array.from(state.collected).sort().join(",");
+        const theirs = d.collected.slice().sort().join(",");
+        if (mine !== theirs) {
+          state.collected = new Set(d.collected);
+          render();
+        }
+      }
       applyRemoteNav(d);
     }
   } catch (e) {

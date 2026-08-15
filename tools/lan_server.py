@@ -30,6 +30,8 @@ def stable_hostname():
 STATE_LOCK = threading.Lock()
 STATE = {"version": 0, "data": {}}
 PDF_LOCK = threading.Lock()
+RESULTS = {"version": 0, "data": None}
+RESULTS_LOCK = threading.Lock()
 PDF_STORE = {"version": 0, "bytes": None, "name": None}
 
 
@@ -65,6 +67,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.startswith("/api/state"):
             with STATE_LOCK:
                 self._send_json(STATE)
+            return
+        if self.path.startswith("/api/results/meta"):
+            with RESULTS_LOCK:
+                self._send_json({"version": RESULTS["version"],
+                                 "hasResults": RESULTS["data"] is not None})
+            return
+        if self.path.startswith("/api/results"):
+            with RESULTS_LOCK:
+                data = RESULTS["data"]
+                version = RESULTS["version"]
+            if data is None:
+                self.send_response(404)
+                self.end_headers()
+                return
+            body = json.dumps({"version": version, "data": data}).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(body)
             return
         if self.path.startswith("/api/pdf/meta"):
             with PDF_LOCK:
@@ -102,6 +125,20 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 STATE["version"] += 1
                 STATE["data"] = data
                 resp = dict(STATE)
+            self._send_json(resp)
+            return
+        if self.path.startswith("/api/results"):
+            # The finished parts list, so the phone can show it without ever
+            # receiving the PDF or doing the work again. It is the computer that
+            # has the file and the time; the phone is a remote control.
+            try:
+                data = json.loads(body.decode("utf-8")) if body else None
+            except (ValueError, UnicodeDecodeError):
+                data = None
+            with RESULTS_LOCK:
+                RESULTS["data"] = data
+                RESULTS["version"] += 1
+                resp = {"version": RESULTS["version"]}
             self._send_json(resp)
             return
         if self.path.startswith("/api/pdf"):

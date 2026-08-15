@@ -1105,3 +1105,100 @@ input[type="range"] {
   padding: 2px 6px;
   white-space: nowrap;
 }
+
+/* A remote control has no file picker and no session list, so the layout
+   should not leave a hole where the sidebar was. */
+body.is-remote .shell { display: block; }
+body.is-remote .sidebar { display: none; }
+body.is-remote .topbar .subtitle { display: none; }
+
+/* ---------- loading animation ---------- */
+/* One 7.2s loop in three beats: stack, sort by colour, and a foot. Every brick
+   runs the same timeline with its own keyframes, so the beats stay together
+   without any script. Kept to five bricks and one darker face each: the point
+   is that the wait feels attended to, not that the screen is busy. */
+
+.loader {
+  display: block;
+  width: 260px;
+  max-width: 100%;
+  height: 120px;
+  margin: 4px auto 10px;
+  overflow: visible;
+}
+
+.loader .brick rect { fill: currentColor; }
+.loader .brick .side { fill: rgba(0, 0, 0, .22); }
+.loader .brick .stud { fill: currentColor; }
+.loader .b1 { color: #d94f4f; }
+.loader .b2 { color: #e8a33d; }
+.loader .b3 { color: #4f9dd9; }
+.loader .b4 { color: #5cb85c; }
+.loader .b5 { color: #8d7ce0; }
+
+.loader .brick { animation: 7.2s cubic-bezier(.3, .7, .3, 1) infinite; }
+.loader .b1 { animation-name: brick1; }
+.loader .b2 { animation-name: brick2; }
+.loader .b3 { animation-name: brick3; }
+.loader .b4 { animation-name: brick4; }
+.loader .b5 { animation-name: brick5; }
+
+/* fall in and stack -> slide out into a colour row -> flinch under the foot */
+@keyframes brick1 {
+  0%   { transform: translate(113px, -40px); opacity: 0; }
+  8%   { transform: translate(113px, 74px); opacity: 1; }
+  38%  { transform: translate(113px, 74px); }
+  50%, 62% { transform: translate(20px, 74px); }
+  70%  { transform: translate(16px, 78px) rotate(-6deg); }
+  86%, 100% { transform: translate(20px, 74px) rotate(0deg); }
+}
+@keyframes brick2 {
+  0%, 6% { transform: translate(113px, -40px); opacity: 0; }
+  16%  { transform: translate(113px, 56px); opacity: 1; }
+  38%  { transform: translate(113px, 56px); }
+  50%, 62% { transform: translate(66px, 74px); }
+  70%  { transform: translate(64px, 80px) rotate(4deg); }
+  86%, 100% { transform: translate(66px, 74px) rotate(0deg); }
+}
+@keyframes brick3 {
+  0%, 12% { transform: translate(113px, -40px); opacity: 0; }
+  24%  { transform: translate(113px, 38px); opacity: 1; }
+  38%  { transform: translate(113px, 38px); }
+  50%, 62% { transform: translate(112px, 74px); }
+  70%  { transform: translate(112px, 86px) scaleY(.72); }
+  86%, 100% { transform: translate(112px, 74px) scaleY(1); }
+}
+@keyframes brick4 {
+  0%, 18% { transform: translate(113px, -40px); opacity: 0; }
+  30%  { transform: translate(113px, 20px); opacity: 1; }
+  38%  { transform: translate(113px, 20px); }
+  50%, 62% { transform: translate(158px, 74px); }
+  70%  { transform: translate(160px, 80px) rotate(-4deg); }
+  86%, 100% { transform: translate(158px, 74px) rotate(0deg); }
+}
+@keyframes brick5 {
+  0%, 24% { transform: translate(113px, -40px); opacity: 0; }
+  36%  { transform: translate(113px, 2px); opacity: 1; }
+  38%  { transform: translate(113px, 2px); }
+  50%, 62% { transform: translate(204px, 74px); }
+  70%  { transform: translate(208px, 78px) rotate(6deg); }
+  86%, 100% { transform: translate(204px, 74px) rotate(0deg); }
+}
+
+/* the foot: down, a beat of contact, back up out of frame */
+.loader-foot {
+  fill: #9aa4b5;
+  animation: loaderFoot 7.2s cubic-bezier(.3, .7, .3, 1) infinite;
+}
+.loader-foot .loader-sole { fill: rgba(0, 0, 0, .18); }
+@keyframes loaderFoot {
+  0%, 62%   { transform: translateY(-70px); opacity: 0; }
+  66%       { opacity: 1; }
+  70%, 76%  { transform: translateY(60px); opacity: 1; }
+  86%, 100% { transform: translateY(-70px); opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* a moving picture is a nicety; the progress bar is the information */
+  .loader { display: none; }
+}

@@ -61,6 +61,25 @@
     </div>
 
     <div class="progress-wrap" id="progress-wrap" hidden>
+      <!-- Something to watch while a 400-page booklet is read. Three beats,
+           looping: the bricks stack up, they sort themselves by colour, and
+           then a foot finds one. Flat shapes with one darker face each — the
+           hint of a third dimension is what keeps it from looking like a
+           spinner, and no more than a hint is what keeps it calm. -->
+      <svg class="loader" id="loader" viewBox="0 0 260 120" aria-hidden="true">
+        <g class="loader-foot">
+          <!-- a leg, and a sole that is wider at the ball than at the heel; that
+               asymmetry is the whole of what makes it read as a foot -->
+          <path d="M116 -50c10 0 17 7 18 16l4 30h-26l4-30c1-9 8-16 18-16z"/>
+          <path d="M106 -6h34c8 0 14 5 14 11 0 6-6 10-14 10h-38c-7 0-12-4-12-10 0-6 8-11 16-11z"/>
+          <ellipse cx="120" cy="16" rx="27" ry="4" class="loader-sole"/>
+        </g>
+        <g class="brick b1"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
+        <g class="brick b2"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
+        <g class="brick b3"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
+        <g class="brick b4"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
+        <g class="brick b5"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
+      </svg>
       <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
       <div class="progress-label" id="progress-label"></div>
     </div>
