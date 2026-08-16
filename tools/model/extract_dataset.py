@@ -41,7 +41,7 @@ def to_input(icon):
     return np.asarray(im, dtype=np.uint8), float(np.log(w / h))
 
 
-def slot_counts(doc, name):
+def slot_counts(doc, name, bg):
     """How many slots each box is cut into, at every scale.
 
     A positive pair says "slot 3 of this box at scale 3.0 is the same part as
@@ -54,7 +54,7 @@ def slot_counts(doc, name):
     for scale in SCALES:
         per_box = {}
         for page in range(doc.page_count):
-            for bi, si, _ in P.iter_page_icons(doc, page, scale):
+            for bi, si, _ in P.iter_page_icons(doc, page, scale, bg):
                 per_box[(page, bi)] = per_box.get((page, bi), 0) + 1
         for k, v in per_box.items():
             counts.setdefault(k, {})[scale] = v
@@ -74,12 +74,16 @@ def main():
         doc = fitz.open(pdf)
         name = os.path.basename(pdf)
         t0 = time.time()
-        consistent = slot_counts(doc, name)
+        # every booklet fills its callouts with its own colour; assuming the
+        # yacht's meant this extractor saw nothing at all in 6540963
+        bg = P.learn_callout_colour(doc)
+        print(f"  {name}: цвет выносок {bg.round(0).tolist()}", flush=True)
+        consistent = slot_counts(doc, name, bg)
         print(f"  {name}: рамок с одинаковой нарезкой во всех масштабах: {len(consistent)}",
               flush=True)
         for scale in SCALES:
             for page in range(doc.page_count):
-                for bi, si, icon in P.iter_page_icons(doc, page, scale):
+                for bi, si, icon in P.iter_page_icons(doc, page, scale, bg):
                     if (page, bi) not in consistent:
                         continue
                     key = (name, page, bi, si)
