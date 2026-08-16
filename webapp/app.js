@@ -1527,13 +1527,30 @@ function readQuantity(subData, subW, cs, ce, rowStart, rowEnd) {
   // without touching it. Column projection would fuse it into that glyph's
   // bounding box and distort the shape; components keep it separate so the
   // size filter below can drop it cleanly.
-  const components = findGlyphComponents(fg, w, h)
+  let components = findGlyphComponents(fg, w, h)
     .filter((c) => {
       const gw = c.maxX - c.minX + 1, gh = c.maxY - c.minY + 1;
       return gh >= MIN_GLYPH_H && gw >= MIN_GLYPH_W && gw <= gh * MAX_GLYPH_ASPECT;
     })
     .sort((a, b) => a.minX - b.minX);
   if (!components.length) return { qty: null, unsure: true, shapes: [] };
+
+  // Digits of one number are set in one size and stand on one line. Anything
+  // here that is not - a corner of a drawing that happened to fall inside the
+  // text strip, a character from the row above in a callout of two rows - is
+  // dropped rather than read as another digit. One white plate on page 9 of
+  // 6540963 was being reported as "42x" by picking up exactly that.
+  if (components.length > 1) {
+    const heights = components.map((c) => c.maxY - c.minY + 1).sort((a, b) => a - b);
+    const medH = heights[heights.length >> 1];
+    const bases = components.map((c) => c.maxY).sort((a, b) => a - b);
+    const medBase = bases[bases.length >> 1];
+    const kept = components.filter((c) => {
+      const gh = c.maxY - c.minY + 1;
+      return Math.abs(gh - medH) <= medH * 0.3 && Math.abs(c.maxY - medBase) <= medH * 0.35;
+    });
+    if (kept.length) components = kept;
+  }
 
   let label = "";
   let anyUnsure = false;
