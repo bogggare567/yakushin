@@ -1173,90 +1173,269 @@ body.is-remote .sidebar { display: none; }
 body.is-remote .topbar .subtitle { display: none; }
 
 /* ---------- loading animation ---------- */
-/* One 7.2s loop in three beats: stack, sort by colour, and a foot. Every brick
-   runs the same timeline with its own keyframes, so the beats stay together
-   without any script. Kept to five bricks and one darker face each: the point
-   is that the wait feels attended to, not that the screen is busy. */
+/* One 9s loop with a story in it: six bricks fall in and build a house, the
+   house becomes a little figure, the figure sorts itself into a colour row,
+   and then a foot comes down on it — dust, flying chips, and out of the mess
+   one finished part. Every element runs the same 9s timeline with its own
+   keyframes, so the beats stay together with no script at all.
+   The keyframes below are generated from a table of poses (tools/gen_loader.py
+   in the commit that added them); edit the table, not the percentages. */
 
 .loader {
   display: block;
   width: 260px;
   max-width: 100%;
-  height: 120px;
+  /* the ratio, not a fixed height: on a narrow phone a 260x120 box holding a
+     260x120 viewBox letterboxes, and then the foot parked just above the
+     picture is inside the element and visible the whole time */
+  aspect-ratio: 260 / 120;
+  height: auto;
   margin: 4px auto 10px;
-  overflow: visible;
+  /* clipped, not visible: the foot waits above the frame between stamps, and
+     with overflow visible an SVG paints outside its box - a giant boot hung
+     over the page heading */
+  overflow: hidden;
+}
+
+/* rotations are about each piece's own middle; about the corner, which is the
+   SVG default, a 30-degree roof brick swings halfway across the picture */
+.loader .brick, .loader-part, .loader-specks rect {
+  transform-box: fill-box;
+  transform-origin: center;
 }
 
 .loader .brick rect { fill: currentColor; }
 .loader .brick .side { fill: rgba(0, 0, 0, .22); }
-.loader .brick .stud { fill: currentColor; }
 .loader .b1 { color: #d94f4f; }
 .loader .b2 { color: #e8a33d; }
 .loader .b3 { color: #4f9dd9; }
 .loader .b4 { color: #5cb85c; }
 .loader .b5 { color: #8d7ce0; }
+.loader .b6 { color: #e5c73c; }
 
-.loader .brick { animation: 7.2s cubic-bezier(.3, .7, .3, 1) infinite; }
-.loader .b1 { animation-name: brick1; }
-.loader .b2 { animation-name: brick2; }
-.loader .b3 { animation-name: brick3; }
-.loader .b4 { animation-name: brick4; }
-.loader .b5 { animation-name: brick5; }
+.loader .brick { animation: 9s cubic-bezier(.3, .7, .3, 1) infinite; }
+.loader .b1 { animation-name: b1-fly; }
+.loader .b2 { animation-name: b2-fly; }
+.loader .b3 { animation-name: b3-fly; }
+.loader .b4 { animation-name: b4-fly; }
+.loader .b5 { animation-name: b5-fly; }
+.loader .b6 { animation-name: b6-fly; }
 
-/* fall in and stack -> slide out into a colour row -> flinch under the foot */
-@keyframes brick1 {
-  0%   { transform: translate(113px, -40px); opacity: 0; }
-  8%   { transform: translate(113px, 74px); opacity: 1; }
-  38%  { transform: translate(113px, 74px); }
-  50%, 62% { transform: translate(20px, 74px); }
-  70%  { transform: translate(16px, 78px) rotate(-6deg); }
-  86%, 100% { transform: translate(20px, 74px) rotate(0deg); }
-}
-@keyframes brick2 {
-  0%, 6% { transform: translate(113px, -40px); opacity: 0; }
-  16%  { transform: translate(113px, 56px); opacity: 1; }
-  38%  { transform: translate(113px, 56px); }
-  50%, 62% { transform: translate(66px, 74px); }
-  70%  { transform: translate(64px, 80px) rotate(4deg); }
-  86%, 100% { transform: translate(66px, 74px) rotate(0deg); }
-}
-@keyframes brick3 {
-  0%, 12% { transform: translate(113px, -40px); opacity: 0; }
-  24%  { transform: translate(113px, 38px); opacity: 1; }
-  38%  { transform: translate(113px, 38px); }
-  50%, 62% { transform: translate(112px, 74px); }
-  70%  { transform: translate(112px, 86px) scaleY(.72); }
-  86%, 100% { transform: translate(112px, 74px) scaleY(1); }
-}
-@keyframes brick4 {
-  0%, 18% { transform: translate(113px, -40px); opacity: 0; }
-  30%  { transform: translate(113px, 20px); opacity: 1; }
-  38%  { transform: translate(113px, 20px); }
-  50%, 62% { transform: translate(158px, 74px); }
-  70%  { transform: translate(160px, 80px) rotate(-4deg); }
-  86%, 100% { transform: translate(158px, 74px) rotate(0deg); }
-}
-@keyframes brick5 {
-  0%, 24% { transform: translate(113px, -40px); opacity: 0; }
-  36%  { transform: translate(113px, 2px); opacity: 1; }
-  38%  { transform: translate(113px, 2px); }
-  50%, 62% { transform: translate(204px, 74px); }
-  70%  { transform: translate(208px, 78px) rotate(6deg); }
-  86%, 100% { transform: translate(204px, 74px) rotate(0deg); }
-}
+/* the foot, in profile */
+.loader-foot { animation: loaderFoot 9s cubic-bezier(.4, .05, .35, 1) infinite; }
+.loader-foot .loader-trouser { fill: #3b465a; }
+.loader-foot .loader-cuff { fill: #4a5770; }
+.loader-foot .loader-leg { fill: #e8c9a8; }
+.loader-foot .loader-shoe { fill: #2f3947; }
+/* a pale sole under a dark upper: that contrast is what makes a shape read as
+   a shoe at 40 pixels tall, more than any amount of outline detail */
+.loader-foot .loader-sole { fill: #cfd6e0; }
+.loader-foot .loader-laces { stroke: #dde3ec; stroke-width: 2.5; stroke-linecap: round; fill: none; }
 
-/* the foot: down, a beat of contact, back up out of frame */
-.loader-foot {
-  fill: #9aa4b5;
-  animation: loaderFoot 7.2s cubic-bezier(.3, .7, .3, 1) infinite;
-}
-.loader-foot .loader-sole { fill: rgba(0, 0, 0, .18); }
+/* The foot is drawn above the frame (its own y runs from -72 to 21), so the
+   travel here is what brings the sole down onto the ground line at y=97,
+   where the bricks are standing. */
 @keyframes loaderFoot {
-  0%, 62%   { transform: translateY(-70px); opacity: 0; }
-  66%       { opacity: 1; }
-  70%, 76%  { transform: translateY(60px); opacity: 1; }
-  86%, 100% { transform: translateY(-70px); opacity: 0; }
+  0%, 52%   { transform: translateY(-40px); }
+  62%       { transform: translateY(76px); }
+  67%       { transform: translateY(68px); }
+  76%, 100% { transform: translateY(-40px); }
 }
+
+/* the commotion */
+.loader-dust circle { fill: #b9c2d0; opacity: 0; transform-box: fill-box; transform-origin: center; }
+.loader-dust .d1 { r: 9px; animation: dust1 9s ease-out infinite; }
+.loader-dust .d2 { r: 7px; animation: dust2 9s ease-out infinite; }
+.loader-dust .d3 { r: 11px; animation: dust3 9s ease-out infinite; }
+.loader-dust .d4 { r: 8px; animation: dust4 9s ease-out infinite; }
+.loader-dust .d5 { r: 10px; animation: dust5 9s ease-out infinite; }
+.loader-dust .d6 { r: 6px; animation: dust6 9s ease-out infinite; }
+
+.loader-specks rect { fill: #8d97a8; opacity: 0; }
+.loader-specks .s1 { animation: speck1 9s cubic-bezier(.2, .6, .4, 1) infinite; }
+.loader-specks .s2 { animation: speck2 9s cubic-bezier(.2, .6, .4, 1) infinite; }
+.loader-specks .s3 { animation: speck3 9s cubic-bezier(.2, .6, .4, 1) infinite; }
+.loader-specks .s4 { animation: speck4 9s cubic-bezier(.2, .6, .4, 1) infinite; }
+
+/* the cartoon impact lines */
+.loader-bang path {
+  stroke: #98a2b3;
+  stroke-width: 3;
+  stroke-linecap: round;
+  fill: none;
+  opacity: 0;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: bang 9s ease-out infinite;
+}
+@keyframes bang {
+  0%, 61%   { transform: scale(.4); opacity: 0; }
+  63%       { transform: scale(1); opacity: .9; }
+  68%, 100% { transform: scale(1.25); opacity: 0; }
+}
+
+/* the finished part */
+.loader-part rect { fill: #4f9dd9; }
+.loader-part .side { fill: rgba(0, 0, 0, .22); }
+.loader-part .gloss { fill: rgba(255, 255, 255, .35); }
+.loader-part { opacity: 0; animation: loaderPart 9s cubic-bezier(.2, .9, .3, 1.2) infinite; }
+@keyframes loaderPart {
+  0%, 74%   { transform: translateY(26px) scale(.5); opacity: 0; }
+  81%       { transform: translateY(-4px) scale(1.06); opacity: 1; }
+  85%       { transform: translateY(0) scale(1); opacity: 1; }
+  96%       { transform: translateY(0) scale(1); opacity: 1; }
+  100%      { transform: translateY(-8px) scale(.96); opacity: 0; }
+}
+
+@keyframes b1-fly {
+  0% { transform: translate(79px, -60px); opacity: 0; }
+  8% { transform: translate(79px, 78px); opacity: 1; }
+  11% { transform: translate(79px, 72px); opacity: 1; }
+  26% { transform: translate(79px, 72px); }
+  34% { transform: translate(96px, 54px); }
+  44% { transform: translate(96px, 54px); }
+  52% { transform: translate(10px, 72px); }
+  61% { transform: translate(10px, 72px); }
+  63% { transform: translate(10px, 65px) rotate(-5deg); }
+  70% { transform: translate(-42px, 42px) rotate(-34deg); opacity: 1; }
+  76% { transform: translate(-58px, 66px) rotate(-51deg); opacity: 0; }
+  100% { transform: translate(79px, -60px); opacity: 0; }
+}
+@keyframes b2-fly {
+  0% { transform: translate(79px, -60px); opacity: 0; }
+  3% { transform: translate(79px, -60px); opacity: 0; }
+  11% { transform: translate(79px, 58px); opacity: 1; }
+  14% { transform: translate(79px, 52px); opacity: 1; }
+  26% { transform: translate(79px, 52px); }
+  34% { transform: translate(96px, 36px); }
+  44% { transform: translate(96px, 36px); }
+  52% { transform: translate(51px, 72px); }
+  61% { transform: translate(51px, 72px); }
+  63% { transform: translate(51px, 65px) rotate(-5deg); }
+  70% { transform: translate(21px, 28px) rotate(-20deg); opacity: 1; }
+  76% { transform: translate(12px, 63px) rotate(-30deg); opacity: 0; }
+  100% { transform: translate(79px, -60px); opacity: 0; }
+}
+@keyframes b3-fly {
+  0% { transform: translate(79px, -60px) rotate(-28deg); opacity: 0; }
+  6% { transform: translate(79px, -60px) rotate(-28deg); opacity: 0; }
+  14% { transform: translate(79px, 34px) rotate(-28deg); opacity: 1; }
+  17% { transform: translate(79px, 28px) rotate(-28deg); opacity: 1; }
+  26% { transform: translate(79px, 28px) rotate(-28deg); }
+  34% { transform: translate(104px, 14px); }
+  44% { transform: translate(104px, 14px); }
+  52% { transform: translate(174px, 72px); }
+  61% { transform: translate(174px, 72px); }
+  63% { transform: translate(174px, 65px) rotate(-5deg); }
+  70% { transform: translate(204px, 26px) rotate(28deg); opacity: 1; }
+  76% { transform: translate(213px, 63px) rotate(42deg); opacity: 0; }
+  100% { transform: translate(79px, -60px) rotate(-28deg); opacity: 0; }
+}
+@keyframes b4-fly {
+  0% { transform: translate(113px, -60px) rotate(28deg); opacity: 0; }
+  9% { transform: translate(113px, -60px) rotate(28deg); opacity: 0; }
+  17% { transform: translate(113px, 34px) rotate(28deg); opacity: 1; }
+  20% { transform: translate(113px, 28px) rotate(28deg); opacity: 1; }
+  26% { transform: translate(113px, 28px) rotate(28deg); }
+  34% { transform: translate(66px, 40px) rotate(-16deg); }
+  44% { transform: translate(66px, 40px) rotate(-16deg); }
+  52% { transform: translate(133px, 72px); }
+  61% { transform: translate(133px, 72px); }
+  63% { transform: translate(133px, 80px) scaleY(.45); }
+  70% { transform: translate(149px, 50px) rotate(-12deg); opacity: 1; }
+  76% { transform: translate(154px, 68px) rotate(-18deg); opacity: 0; }
+  100% { transform: translate(113px, -60px) rotate(28deg); opacity: 0; }
+}
+@keyframes b5-fly {
+  0% { transform: translate(113px, -60px); opacity: 0; }
+  12% { transform: translate(113px, -60px); opacity: 0; }
+  20% { transform: translate(113px, 58px); opacity: 1; }
+  23% { transform: translate(113px, 52px); opacity: 1; }
+  26% { transform: translate(113px, 52px); }
+  34% { transform: translate(126px, 40px) rotate(16deg); }
+  44% { transform: translate(126px, 40px) rotate(16deg); }
+  52% { transform: translate(215px, 72px); }
+  61% { transform: translate(215px, 72px); }
+  63% { transform: translate(215px, 65px) rotate(-5deg); }
+  70% { transform: translate(273px, 38px) rotate(32deg); opacity: 1; }
+  76% { transform: translate(290px, 65px) rotate(48deg); opacity: 0; }
+  100% { transform: translate(113px, -60px); opacity: 0; }
+}
+@keyframes b6-fly {
+  0% { transform: translate(113px, -60px); opacity: 0; }
+  15% { transform: translate(113px, -60px); opacity: 0; }
+  23% { transform: translate(113px, 78px); opacity: 1; }
+  26% { transform: translate(113px, 72px); opacity: 1; }
+  34% { transform: translate(105px, 72px); }
+  44% { transform: translate(105px, 72px); }
+  52% { transform: translate(92px, 72px); }
+  61% { transform: translate(92px, 72px); }
+  63% { transform: translate(92px, 80px) scaleY(.45); }
+  70% { transform: translate(72px, 54px) rotate(14deg); opacity: 1; }
+  76% { transform: translate(66px, 68px) rotate(21deg); opacity: 0; }
+  100% { transform: translate(113px, -60px); opacity: 0; }
+}
+@keyframes dust1 {
+  0%, 62% { transform: translate(0, 0) scale(.2); opacity: 0; }
+  64%     { transform: translate(-14px, -2px) scale(.9); opacity: .85; }
+  72%     { transform: translate(-46px, -6px) scale(1.7); opacity: .35; }
+  78%, 100% { transform: translate(-58px, -7px) scale(2.04); opacity: 0; }
+}
+@keyframes dust2 {
+  0%, 62% { transform: translate(0, 0) scale(.2); opacity: 0; }
+  64%     { transform: translate(-8px, -5px) scale(.9); opacity: .85; }
+  72%     { transform: translate(-26px, -16px) scale(1.3); opacity: .35; }
+  78%, 100% { transform: translate(-32px, -19px) scale(1.56); opacity: 0; }
+}
+@keyframes dust3 {
+  0%, 62% { transform: translate(0, 0) scale(.2); opacity: 0; }
+  64%     { transform: translate(-2px, -6px) scale(.9); opacity: .85; }
+  72%     { transform: translate(-8px, -20px) scale(1.1); opacity: .35; }
+  78%, 100% { transform: translate(-10px, -24px) scale(1.32); opacity: 0; }
+}
+@keyframes dust4 {
+  0%, 62% { transform: translate(0, 0) scale(.2); opacity: 0; }
+  64%     { transform: translate(4px, -5px) scale(.9); opacity: .85; }
+  72%     { transform: translate(14px, -17px) scale(1.4); opacity: .35; }
+  78%, 100% { transform: translate(18px, -20px) scale(1.68); opacity: 0; }
+}
+@keyframes dust5 {
+  0%, 62% { transform: translate(0, 0) scale(.2); opacity: 0; }
+  64%     { transform: translate(10px, -2px) scale(.9); opacity: .85; }
+  72%     { transform: translate(34px, -8px) scale(1.6); opacity: .35; }
+  78%, 100% { transform: translate(42px, -10px) scale(1.92); opacity: 0; }
+}
+@keyframes dust6 {
+  0%, 62% { transform: translate(0, 0) scale(.2); opacity: 0; }
+  64%     { transform: translate(16px, 1px) scale(.9); opacity: .85; }
+  72%     { transform: translate(52px, 2px) scale(1.2); opacity: .35; }
+  78%, 100% { transform: translate(65px, 2px) scale(1.44); opacity: 0; }
+}
+@keyframes speck1 {
+  0%, 62%   { transform: translate(0, 0) rotate(0deg); opacity: 0; }
+  64%       { transform: translate(0, 0) rotate(0deg); opacity: 1; }
+  74%       { transform: translate(-58px, -40px) rotate(-160deg); opacity: 1; }
+  80%, 100% { transform: translate(-70px, -22px) rotate(-208deg); opacity: 0; }
+}
+@keyframes speck2 {
+  0%, 62%   { transform: translate(0, 0) rotate(0deg); opacity: 0; }
+  64%       { transform: translate(0, 0) rotate(0deg); opacity: 1; }
+  74%       { transform: translate(-30px, -54px) rotate(120deg); opacity: 1; }
+  80%, 100% { transform: translate(-36px, -30px) rotate(156deg); opacity: 0; }
+}
+@keyframes speck3 {
+  0%, 62%   { transform: translate(0, 0) rotate(0deg); opacity: 0; }
+  64%       { transform: translate(0, 0) rotate(0deg); opacity: 1; }
+  74%       { transform: translate(28px, -50px) rotate(-140deg); opacity: 1; }
+  80%, 100% { transform: translate(34px, -28px) rotate(-182deg); opacity: 0; }
+}
+@keyframes speck4 {
+  0%, 62%   { transform: translate(0, 0) rotate(0deg); opacity: 0; }
+  64%       { transform: translate(0, 0) rotate(0deg); opacity: 1; }
+  74%       { transform: translate(58px, -34px) rotate(170deg); opacity: 1; }
+  80%, 100% { transform: translate(70px, -19px) rotate(221deg); opacity: 0; }
+}
+
 
 @media (prefers-reduced-motion: reduce) {
   /* a moving picture is a nicety; the progress bar is the information */

@@ -67,18 +67,50 @@
            hint of a third dimension is what keeps it from looking like a
            spinner, and no more than a hint is what keeps it calm. -->
       <svg class="loader" id="loader" viewBox="0 0 260 120" aria-hidden="true">
-        <g class="loader-foot">
-          <!-- a leg, and a sole that is wider at the ball than at the heel; that
-               asymmetry is the whole of what makes it read as a foot -->
-          <path d="M116 -50c10 0 17 7 18 16l4 30h-26l4-30c1-9 8-16 18-16z"/>
-          <path d="M106 -6h34c8 0 14 5 14 11 0 6-6 10-14 10h-38c-7 0-12-4-12-10 0-6 8-11 16-11z"/>
-          <ellipse cx="120" cy="16" rx="27" ry="4" class="loader-sole"/>
-        </g>
+        <!-- Six bricks build a house, become a figure, sort themselves into a
+             colour row, and get stood on. Drawn in profile: a foot seen from
+             the front is a blob, and it is the heel-arch-toes line that makes
+             anyone recognise one. -->
         <g class="brick b1"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
         <g class="brick b2"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
         <g class="brick b3"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
         <g class="brick b4"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
         <g class="brick b5"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
+        <g class="brick b6"><rect x="0" y="8" width="34" height="14" rx="2"/><rect class="side" x="0" y="19" width="34" height="5" rx="2"/><rect class="stud" x="5" y="4" width="9" height="5" rx="2"/><rect class="stud" x="20" y="4" width="9" height="5" rx="2"/></g>
+
+        <g class="loader-foot">
+          <rect class="loader-trouser" x="106" y="-84" width="38" height="34" rx="6"/>
+          <rect class="loader-cuff" x="102" y="-54" width="46" height="11" rx="5"/>
+          <rect class="loader-leg" x="112" y="-46" width="26" height="28" rx="5"/>
+          <path class="loader-shoe" d="M112 -20h26v4c0 9 7 13 17 16 10 3 15 6 15 11H92c-4 0-6-3-6-7 0-9 9-17 20-20 4-1 6-2 6-4z"/>
+          <rect class="loader-sole" x="86" y="9" width="82" height="12" rx="6"/>
+          <path class="loader-laces" d="M120 -14l14 7M117 -5l15 7"/>
+        </g>
+
+        <g class="loader-dust">
+          <circle class="d1" cx="128" cy="90"/><circle class="d2" cx="128" cy="90"/>
+          <circle class="d3" cx="128" cy="90"/><circle class="d4" cx="128" cy="90"/>
+          <circle class="d5" cx="128" cy="90"/><circle class="d6" cx="128" cy="90"/>
+        </g>
+        <g class="loader-specks">
+          <rect class="s1" x="124" y="86" width="7" height="4" rx="1"/>
+          <rect class="s2" x="124" y="86" width="5" height="5" rx="1"/>
+          <rect class="s3" x="124" y="86" width="8" height="4" rx="1"/>
+          <rect class="s4" x="124" y="86" width="5" height="4" rx="1"/>
+        </g>
+        <g class="loader-bang">
+          <path d="M128 68v-14M110 74l-10-10M146 74l10-10M100 88H86M156 88h14"/>
+        </g>
+
+        <!-- and what all that was for: one finished part -->
+        <g class="loader-part">
+          <rect x="96" y="60" width="64" height="26" rx="3"/>
+          <rect class="side" x="96" y="80" width="64" height="8" rx="3"/>
+          <rect class="stud" x="104" y="52" width="12" height="9" rx="3"/>
+          <rect class="stud" x="122" y="52" width="12" height="9" rx="3"/>
+          <rect class="stud" x="140" y="52" width="12" height="9" rx="3"/>
+          <rect class="gloss" x="102" y="64" width="52" height="5" rx="2"/>
+        </g>
       </svg>
       <div class="progress-bar"><div class="progress-fill" id="progress-fill"></div></div>
       <div class="progress-label" id="progress-label"></div>
