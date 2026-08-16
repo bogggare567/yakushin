@@ -1,0 +1,69 @@
+# Checks that catch the ways this project has actually broken, and nothing
+# else. No PDFs live in the repo — the instruction booklets are licensed for
+# personal use and never leave the owner's machine — so there is no end-to-end
+# run here. What can be checked without them is checked.
+name: Проверки
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  webapp:
+    name: Веб-приложение
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Синтаксис всех скриптов
+        run: |
+          for f in webapp/*.js; do
+            node --check "$f" || exit 1
+            echo "  ok  $f"
+          done
+
+      - name: Каждый элемент, который ищет app.js, есть в разметке
+        run: node tools/check_ids.js
+
+      - name: Версия в app.js и version.json совпадают
+        run: node tools/check_version.js
+
+      - name: Модель на месте и нужного размера
+        run: |
+          test -f webapp/vendor/partmodel.bin || { echo "нет файла модели"; exit 1; }
+          SIZE=$(wc -c < webapp/vendor/partmodel.bin)
+          echo "модель: $SIZE байт"
+          test "$SIZE" -gt 10000 || { echo "модель подозрительно мала"; exit 1; }
+
+  tools:
+    name: Питон-инструменты
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Зависимости
+        run: pip install --quiet numpy scipy pillow pymupdf
+
+      - name: Всё компилируется
+        run: python -m compileall -q tools
+
+      - name: Шаблоны цифр и разбор нарезки
+        run: python tools/model/test_glyphs.py
+
+      - name: Сервер поднимается и отвечает
+        # the phone talks to this and nothing else; a syntax error here means
+        # "не открывается на телефоне" and no other symptom
+        run: |
+          python tools/lan_server.py 8931 webapp &
+          sleep 2
+          curl -sf "http://127.0.0.1:8931/api/info" | tee /dev/stderr | grep -q '"port": 8931'
+          curl -sf "http://127.0.0.1:8931/api/peers" | grep -q '"peers"'
+          curl -sf -X POST -H 'Content-Type: application/json' \
+               -d '{"page": 7}' "http://127.0.0.1:8931/api/page-want" | grep -q '"page": 7'
+          curl -sf "http://127.0.0.1:8931/index.html" > /dev/null
+          echo "  ok  сервер отвечает"
