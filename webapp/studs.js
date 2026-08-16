@@ -42,6 +42,18 @@ const STUD_STRONG_PEAK = 0.20; // a repeat vector must be this much of the best 
 const STUD_SQUARE_TOL = 0.80;  // the two lattice vectors must be near equal in length
 const STUD_SUPPORT_FLOOR = 0.10; // how much an icon must repeat along a lattice
 const STUD_LATTICE_MIN_AREA = 12000; // below this an icon cannot host a search
+// A part's top face, in lattice cells, against the ink the part is drawn with.
+// Seen edge-on the top face is a fraction of the silhouette; it is never much
+// more than the whole of it.
+const STUD_FACE_MAX = 1.25;
+const STUD_FACE_MIN = 0.20;
+// How far below the booklet's own usual stud a reading may claim to be before
+// it is thrown out. Not an absolute size: 6540963 really does draw a stud four
+// pixels across, and a fixed floor threw that whole booklet away. What is not
+// believable is a reading that disagrees with the rest of its own book by a
+// factor of three — that is a 1x1 brick measured against a lattice four times
+// too fine, which is how four of them came back "10x2".
+const STUD_PITCH_MIN_SHARE = 0.34;
 
 /** Best lattice for one callout box, from whichever of its icons shows it best.
  *
@@ -60,7 +72,9 @@ function studBoxLattice(preps) {
   }
   return best;
 }
+
 const STUD_MIN_AGREEING = 2;   // a printed size needs this many readings agreeing
+const STUD_LONE_TOL = 0.10;    // ...unless there is only one, and it is this exact
 
 // Footprints LEGO actually makes. A count landing on 1x7 is a near miss on a
 // 1x8, not a discovery — and this number exists to be checked against, so a
@@ -136,7 +150,7 @@ function studPrepare(canvas) {
   if (n < 200 || xl < 0 || xr - xl < 16) return null;
   const mean = sum / n;
   for (let p = 0; p < lum.length; p++) lum[p] = fg[p] ? lum[p] - mean : 0;
-  return { lum, w, h, left: [xl, yl], right: [xr, yr] };
+  return { lum, w, h, area: n, k: canvas.studK || 1, left: [xl, yl], right: [xr, yr] };
 }
 
 /** Bilinear read of the autocorrelation at a fractional shift. */
@@ -302,22 +316,69 @@ function studLattice(prep) {
  * itself while a smooth curve does not. Measured over a booklet, real plates
  * score 0.20 and up, that slope scores 0.08 and 0.015.
  */
-function studSupports(prep, u, v) {
+/** The icon with its flat areas taken out, leaving only detail.
+ *
+ * A brick is mostly one colour, and one colour shifted by anything lies on
+ * itself perfectly. That is why the shift test below used to pass on a 1x1
+ * brick given a lattice four times too small: the flat top agreed with itself
+ * and there were no studs in the comparison at all. Subtracting a local
+ * average leaves the stud rings and the edges — the only things whose repeat
+ * means anything — and the test then measures what it is named after.
+ */
+function studDetail(prep) {
+  if (prep.detail) return prep.detail;
   const { lum, w, h } = prep;
-  let norm = 0;
-  for (let i = 0; i < lum.length; i++) norm += lum[i] * lum[i];
-  if (norm <= 0) return false;
+  const r = 4;
+  const rowsum = new Float64Array(w * h);
+  for (let y = 0; y < h; y++) {
+    let acc = 0;
+    for (let x = 0; x < w; x++) {
+      acc += lum[y * w + x];
+      if (x > 2 * r) acc -= lum[y * w + x - 2 * r - 1];
+      rowsum[y * w + Math.max(0, x - r)] = acc / Math.min(x + 1, 2 * r + 1);
+    }
+  }
+  const out = new Float64Array(w * h);
+  for (let x = 0; x < w; x++) {
+    let acc = 0;
+    for (let y = 0; y < h; y++) {
+      acc += rowsum[y * w + x];
+      if (y > 2 * r) acc -= rowsum[(y - 2 * r - 1) * w + x];
+      const yy = Math.max(0, y - r);
+      out[yy * w + x] = lum[yy * w + x] - acc / Math.min(y + 1, 2 * r + 1);
+    }
+  }
+  prep.detail = out;
+  return out;
+}
+
+function studSupports(prep, u, v) {
+  const { w, h } = prep;
+  const lum = studDetail(prep);
   for (const vec of [u, v]) {
     const dx = Math.round(vec[0]), dy = Math.round(vec[1]);
     if (Math.abs(dx) >= w || Math.abs(dy) >= h) return false;
-    let acc = 0, n = 0;
+    // Measured over the part that actually overlaps itself after the shift,
+    // against the energy of that same part — not against the whole icon.
+    //
+    // Dividing by the whole icon made this test a size filter in disguise: a
+    // 2x2 plate shifted by one stud only lies on itself over half its area, so
+    // its score could not exceed about a half however perfect the lattice,
+    // while a 12-stud beam overlaps almost entirely and scored freely. Small
+    // parts with perfectly visible studs were being refused for being small —
+    // 251 of one booklet's 509 icons died here.
+    let acc = 0, ea = 0, eb = 0, n = 0;
     const y0 = Math.max(0, dy), y1 = h + Math.min(0, dy);
     const x0 = Math.max(0, dx), x1 = w + Math.min(0, dx);
     for (let y = y0; y < y1; y++) {
       const a = y * w, b = (y - dy) * w - dx;
-      for (let x = x0; x < x1; x++, n++) acc += lum[a + x] * lum[b + x];
+      for (let x = x0; x < x1; x++, n++) {
+        const A = lum[a + x], B = lum[b + x];
+        acc += A * B; ea += A * A; eb += B * B;
+      }
     }
-    if (n < 100 || acc / norm < STUD_SUPPORT_FLOOR) return false;
+    const denom = Math.sqrt(ea * eb);
+    if (n < 100 || denom <= 0 || acc / denom < STUD_SUPPORT_FLOOR) return false;
   }
   return true;
 }
@@ -341,16 +402,32 @@ function studSolve(prep, pair) {
   // Nothing above picked the answer by a threshold, so how close these land to
   // whole numbers is a free check rather than a fitted result. A part that
   // comes out at 16.48 and 0.49 is not a rectangular grid of studs.
-  if (err > STUD_FIT_TOL) return null;
+  if (err > STUD_FIT_TOL) { return null; }
   // Both sides must be at least 2. With a count of 1 the lattice takes exactly
   // one step in that direction and nothing confirms it — the answer rests on a
   // single unverified vector. That is how a smooth white wedge with no studs
   // came back "8x1". Real 1xN plates lose out too, but they were already
   // almost never measurable: one row of studs gives no second direction.
-  if (kw < 2 || kl < 2 || kw > STUD_MAX || kl > STUD_MAX) return null;
+  if (kw < 2 || kl < 2 || kw > STUD_MAX || kl > STUD_MAX) { return null; }
+
+  // Does the drawing have room for that many studs? A W by L top face covers
+  // W*L cells of the lattice, and that area cannot be larger than the part it
+  // is drawn on. Four 1x1 bricks in one yacht booklet came back "10x2": tiny
+  // icons borrowing the lattice of a big neighbour in the same callout, where
+  // nothing then objected that ten studs will not fit in thirty pixels.
+  // in the page's own pixels, so readings from callouts enlarged by different
+  // amounts can be compared with each other later
+  const pitch = Math.min(Math.hypot(u[0], u[1]), Math.hypot(v[0], v[1])) / (prep.k || 1);
+
+  const cell = Math.abs(u[0] * v[1] - u[1] * v[0]);
+  const face = kw * kl * cell;
+  if (cell > 0 && prep.area > 0) {
+    const ratio = face / prep.area;
+    if (ratio > STUD_FACE_MAX || ratio < STUD_FACE_MIN) { return null; }
+  }
   const size = [Math.max(kw, kl), Math.min(kw, kl)];
-  if (!STUD_REAL_SIZES.has(`${size[1]}x${size[0]}`)) return null;
-  return { size, err };
+  if (!STUD_REAL_SIZES.has(`${size[1]}x${size[0]}`)) { return null; }
+  return { size, err, pitch };
 }
 
 function studLabel(size) {

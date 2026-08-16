@@ -77,6 +77,12 @@ const MIN_ICON_SIDE = 9 * SIZE_K;                    // thinner is a printed rul
 const MIN_ICON_AREA = 60 * SIZE_K * SIZE_K;          // smaller is a speck
 const GLYPH_ICON_DIST_FRAC = 0.145;                  // this close to a digit's shape, it IS the digit
 const DIGIT_INK_LIMIT = 0.55;                        // more of the drawing than this being type
+// Counting studs needs pixels the page render never had. A callout is redrawn
+// on its own at whatever scale brings its biggest icon up to a size the
+// lattice search can work with, within these bounds.
+const STUD_TARGET_AREA = 20000;      // studs.js's own floor for correlating
+const STUD_MAX_UPSCALE = 4;          // beyond this the drawing has no more detail to give
+const STUD_MAX_PIXELS = 4.5e6;       // one callout must never cost more than a page
 
 const pdfInput = document.getElementById("pdf-input");
 const fileInfo = document.getElementById("file-info");
@@ -365,7 +371,7 @@ async function runAnalysis() {
         }
         if (studs) {
           studItems.push({
-            row: bucketIdx, size: studs.size, err: studs.err,
+            row: bucketIdx, size: studs.size, err: studs.err, pitch: studs.pitch,
             pr: pageRecords.length, ii: pageItems.length - 1,
             qty, page: pageNum, thumb,
           });
@@ -530,7 +536,8 @@ async function processPage(pageNum) {
                                    Math.abs(b.inner[1] - INNER_BG[1]),
                                    Math.abs(b.inner[2] - INNER_BG[2])) <= 14)
     : boxes;
-  parts.forEach((box, bi) => {
+  for (let bi = 0; bi < parts.length; bi++) {
+    const box = parts[bi];
     // read this box against what is actually inside it
     ACTIVE_BG = box.inner || BOX_BG;
     const boxItems = extractBoxItems(canvas, ctx, box);
@@ -539,8 +546,18 @@ async function processPage(pageNum) {
     // lattice describes all of them, and the small ones — which carry too few
     // stud periods to find a lattice on their own — then need nothing but
     // their two corners. See studs.js.
+    //
+    // And they are measured on a picture drawn for the purpose. At the page's
+    // own render scale a part in 6540963 is about 70x50 pixels, and 271 of
+    // that booklet's 309 callouts held nothing big enough to find a lattice in
+    // at all — the studs were not faintly visible, they were not there. So the
+    // callout alone is re-rendered several times larger first. It is a small
+    // rectangle, so this costs a fraction of a page render.
     const crops = boxItems.map((it) => autocropCanvas(it.imgCanvas));
-    const preps = crops.map((c) => studPrepare(c));
+    // the enlarged copies are for measuring only: what identifies a part, and
+    // the picture shown for it, stay exactly what they were
+      const measured = (await studCrops(page, box, boxItems)) || crops;
+    const preps = measured.map((c) => studPrepare(c));
     const lattice = studBoxLattice(preps);
     boxItems.forEach((it, k) => {
       it.boxIdx = bi;
@@ -549,7 +566,7 @@ async function processPage(pageNum) {
       it.studs = lattice ? studSolve(preps[k], lattice) : null;
       items.push(it);
     });
-  });
+  }
   ACTIVE_BG = wasBg;
   // store positions as fractions of the page, so the highlight lands correctly
   // whatever size the page image is displayed at
@@ -563,6 +580,67 @@ async function processPage(pageNum) {
   }
   const thumbDataUrl = makePageThumb(canvas);
   return { items, thumbDataUrl };
+}
+
+/** The icons of one callout, re-rendered several times larger, for counting studs.
+ *
+ * Nothing clever recovers detail that was never rendered. At the page's own
+ * scale a part in 6540963 covers about 70x50 pixels, its studs three or four
+ * across — and 271 of that booklet's 309 callouts contained no icon big enough
+ * to look for a lattice in. Drawing the callout again on its own, at a scale
+ * chosen so its biggest icon is worth measuring, is what puts the studs in the
+ * picture. Only the callout is drawn, so this is a small fraction of a page.
+ *
+ * Returns null if there is nothing to gain, and the caller then measures the
+ * page-scale crops exactly as before.
+ */
+async function studCrops(page, box, boxItems) {
+  if (!boxItems.length) return null;
+  const bw = box.x1 - box.x0, bh = box.y1 - box.y0;
+  if (bw <= 0 || bh <= 0) return null;
+  const biggest = boxItems.reduce((a, b) =>
+    (b.iconRect.w * b.iconRect.h > a.iconRect.w * a.iconRect.h ? b : a));
+  const area = biggest.iconRect.w * biggest.iconRect.h;
+  if (!area) return null;
+  // enough for the biggest icon here to clear the lattice search's floor, and
+  // never so much that one callout costs more than the page it came from
+  let k = Math.sqrt((STUD_TARGET_AREA * 1.3) / area);
+  k = clamp(k, 1, STUD_MAX_UPSCALE);
+  if (k <= 1.05) return null;
+  if (bw * k * bh * k > STUD_MAX_PIXELS) k = Math.sqrt(STUD_MAX_PIXELS / (bw * bh));
+  if (k <= 1.05) return null;
+
+  const scale = RENDER_SCALE * k;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.ceil(bw * k);
+  canvas.height = Math.ceil(bh * k);
+  const ctx = canvas.getContext("2d", { willReadFrequently: true });
+  try {
+    await page.render({
+      canvasContext: ctx,
+      viewport: page.getViewport({ scale }),
+      // draw the whole page, but with its origin moved so only this callout
+      // lands on the canvas
+      transform: [1, 0, 0, 1, -box.x0 * k, -box.y0 * k],
+    }).promise;
+  } catch (err) {
+    return null;   // a render that fails costs nothing: fall back to page scale
+  }
+
+  return boxItems.map((it) => {
+    const r = it.iconRect;
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(r.w * k));
+    c.height = Math.max(1, Math.round(r.h * k));
+    c.getContext("2d").drawImage(
+      canvas, Math.round((r.x - box.x0) * k), Math.round((r.y - box.y0) * k),
+      c.width, c.height, 0, 0, c.width, c.height);
+    const cropped = autocropCanvas(c);
+    // how much bigger than the page this copy is, so a measurement can be
+    // judged against what the booklet actually drew
+    cropped.studK = k;
+    return cropped;
+  });
 }
 
 function makePageThumb(canvas) {
@@ -1180,6 +1258,9 @@ function extractRowItems(pageCanvas, pageCtx, subData, fg, x0, y0, w, band) {
       unsure: qtyResult.unsure,
       glyphs: qtyResult.shapes || [],
       rect: { x: x0 + cs, y: y0 + r0, w: ce - cs, h: slotH },
+      // the picture alone, without its quantity: this is what gets re-rendered
+      // large to count studs on, so it must not carry the label into the crop
+      iconRect: { x: x0 + cs, y: y0 + r0, w: ce - cs, h: effSplit },
     });
   }
   return results;
@@ -1994,8 +2075,18 @@ function smallThumb(canvas) {
 function applyStudSizes(buckets, studItems, pageRecords) {
   if (!studItems.length) return;
 
+  // What one stud is, across this whole booklet. Callouts are drawn at their
+  // own scales, so this is not a measurement — but a reading claiming studs
+  // three times finer than anything else in the book is not one either. Four
+  // 1x1 bricks came back "10x2" that way, borrowing a big neighbour's lattice.
+  const pitches = studItems.map((it) => it.pitch).filter((p) => p > 0).sort((a, b) => a - b);
+  const median = pitches.length ? pitches[pitches.length >> 1] : 0;
+  const believable = median
+    ? studItems.filter((it) => !(it.pitch > 0) || it.pitch >= median * STUD_PITCH_MIN_SHARE)
+    : studItems;
+
   const byRow = new Map();
-  for (const it of studItems) {
+  for (const it of believable) {
     if (!byRow.has(it.row)) byRow.set(it.row, []);
     byRow.get(it.row).push(it);
   }
@@ -2015,8 +2106,17 @@ function applyStudSizes(buckets, studItems, pageRecords) {
     // number proves nothing: a box whose lattice is slightly wrong produces
     // near-whole, real-looking sizes all day — page 106 of one booklet reads a
     // 4x4 plate as 8x4 and an 8x8 as 16x8, both plausible, both wrong.
-    const decisive = winner.length >= STUD_MIN_AGREEING
-      && winner.length / members.length > 0.5;
+    //
+    // With one exception, added once the measurement itself grew two checks it
+    // did not have: that the studs are the size a booklet actually draws, and
+    // that the claimed footprint fits in the drawing. A part that appears in
+    // exactly one callout in the whole book can never be confirmed by a second
+    // reading — 6540963 has hundreds of those and got not one printed size —
+    // so a lone reading that lands very close to whole numbers is allowed to
+    // speak for itself. A lone reading that is merely acceptable still is not.
+    const decisive = (winner.length >= STUD_MIN_AGREEING
+                      && winner.length / members.length > 0.5)
+      || (members.length === 1 && winner[0].err <= STUD_LONE_TOL);
     if (decisive) buckets[row].studSize = winner[0].size;
 
     // Splitting does not wait for a majority. A row holding a 6x6 plate and an
