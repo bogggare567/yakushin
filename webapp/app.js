@@ -139,6 +139,11 @@ const partSheetPos = document.getElementById("part-sheet-pos");
 const partSheetPage = document.getElementById("part-sheet-page");
 const partPageImg = document.getElementById("part-page-img");
 const partHighlight = document.getElementById("part-highlight");
+const partPageStage = document.getElementById("part-page-stage");
+const partPageWait = document.getElementById("part-page-wait");
+const partZoomIn = document.getElementById("part-zoom-in");
+const partZoomOut = document.getElementById("part-zoom-out");
+const partZoomLevel = document.getElementById("part-zoom-level");
 const setupPanelEl = document.getElementById("setup-panel");
 const fileFieldEl = document.getElementById("file-field");
 const sessionHeaderEl = document.getElementById("session-header");
@@ -445,10 +450,18 @@ async function pushResults() {
       body: JSON.stringify({
         name: currentPdfName,
         from: state.from, to: state.to,
-        rows: state.buckets.map((b) => ({
+        rows: state.buckets.map((b, idx) => ({
           t: b.thumbUrl, c: b.count, u: !!b.unsure,
           p: Array.from(b.pages).sort((x, y) => x - y),
           s: b.studSize || null,
+          // where on each page this part was seen, so the phone can put the
+          // same frame around it that the computer does. Without these it
+          // could only name the page numbers and shrug.
+          e: partEntries(idx).map((en) => ({
+            p: en.pageNum, q: en.qty,
+            r: en.rect ? [round4(en.rect.x), round4(en.rect.y),
+                          round4(en.rect.w), round4(en.rect.h)] : null,
+          })),
           // the dominant colour travels too: the default view groups the list
           // by colour, and without it the remote rendered nothing at all
           a: b.avgColor,
@@ -467,6 +480,10 @@ function adoptResults(payload) {
     thumbUrl: r.t, count: r.c, unsure: r.u,
     pages: new Set(r.p || []), studSize: r.s || null,
     avgColor: r.a || [128, 128, 128],
+    entries: (r.e || []).map((en) => ({
+      pageNum: en.p, qty: en.q,
+      rect: en.r ? { x: en.r[0], y: en.r[1], w: en.r[2], h: en.r[3] } : null,
+    })),
   }));
   state.pageRecords = [];          // page pictures stay on the computer
   state.from = payload.from;
@@ -509,6 +526,26 @@ function generateSessionId() {
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)); }
 
+/** Give the browser a turn.
+ *
+ * Reading a booklet is one long stretch of pixel work, and without a break in
+ * it nothing on screen moves: measured over 40 pages, 299 of 461 frames never
+ * got drawn and the longest single task ran 280ms. The loading animation is
+ * the thing people watch while they wait, so it has to keep moving.
+ *
+ * A MessageChannel rather than setTimeout on purpose: browsers throttle timers
+ * hard in a background tab, and an analysis left running behind another window
+ * would crawl. This yields without asking to be scheduled later.
+ */
+let yieldChannel = null;
+function yieldToBrowser() {
+  if (!yieldChannel) yieldChannel = new MessageChannel();
+  return new Promise((resolve) => {
+    yieldChannel.port1.onmessage = () => resolve();
+    yieldChannel.port2.postMessage(0);
+  });
+}
+
 function setProgress(frac, label) {
   progressFill.style.width = `${Math.round(frac * 100)}%`;
   progressLabel.textContent = label;
@@ -525,6 +562,7 @@ async function processPage(pageNum) {
 
   const full = ctx.getImageData(0, 0, canvas.width, canvas.height);
   const boxes = findBlueBoxes(full, canvas.width, canvas.height);
+  await yieldToBrowser();
 
   const items = [];
   const wasBg = ACTIVE_BG;
@@ -541,6 +579,7 @@ async function processPage(pageNum) {
     // read this box against what is actually inside it
     ACTIVE_BG = box.inner || BOX_BG;
     const boxItems = extractBoxItems(canvas, ctx, box);
+    await yieldToBrowser();
     // Studs are measured here, per box, rather than per icon later: every icon
     // inside one box is drawn at the same scale by the same camera, so one
     // lattice describes all of them, and the small ones — which carry too few
@@ -558,7 +597,8 @@ async function processPage(pageNum) {
     // the picture shown for it, stay exactly what they were
       const measured = (await studCrops(page, box, boxItems)) || crops;
     const preps = measured.map((c) => studPrepare(c));
-    const lattice = studBoxLattice(preps);
+    await yieldToBrowser();
+    const lattice = await studBoxLattice(preps, yieldToBrowser);
     boxItems.forEach((it, k) => {
       it.boxIdx = bi;
       it.cropped = crops[k];
@@ -566,6 +606,7 @@ async function processPage(pageNum) {
       it.studs = lattice ? studSolve(preps[k], lattice) : null;
       items.push(it);
     });
+    await yieldToBrowser();   // one callout is about as long as a frame allows
   }
   ACTIVE_BG = wasBg;
   // store positions as fractions of the page, so the highlight lands correctly
@@ -2463,28 +2504,28 @@ function makePartCard(bucket, qty, unsure, pages, bucketIdx) {
 
 let partViewer = null; // { bucketIdx, entries: [{pageNum, rect, qty}], index }
 
-function openPartPages(bucketIdx) {
-  if (IS_REMOTE) {
-    // The page images live on the computer with the PDF. Rather than ship
-    // hundreds of them over Wi-Fi for a glance, the remote names the pages and
-    // the computer shows them.
-    const b = state.buckets[bucketIdx];
-    const pages = b ? Array.from(b.pages).sort((x, y) => x - y).join(", ") : "";
-    alert(pages ? `Эта деталь на страницах: ${pages}\n\nСами страницы смотрите на компьютере.`
-                : "Страницы этой детали известны только на компьютере.");
-    return;
-  }
-  const bucket = state.buckets[bucketIdx];
-  if (!bucket) return;
-  const entries = [];
+function round4(v) { return Math.round(v * 10000) / 10000; }
+
+/** Every place one part was seen: page, position on it, and how many. */
+function partEntries(bucketIdx) {
+  const out = [];
   for (const rec of state.pageRecords) {
     for (const it of rec.items) {
       if (it.bucketIdx !== bucketIdx) continue;
-      entries.push({ pageNum: rec.pageNum, rect: it.rect, qty: it.qty, thumb: rec.thumbDataUrl });
+      out.push({ pageNum: rec.pageNum, rect: it.rect, qty: it.qty, thumb: rec.thumbDataUrl });
     }
   }
+  return out;
+}
+
+function openPartPages(bucketIdx) {
+  const bucket = state.buckets[bucketIdx];
+  if (!bucket) return;
+  // On the phone the positions arrived with the list; the page pictures
+  // themselves are asked for one at a time as they are looked at.
+  const entries = IS_REMOTE ? (bucket.entries || []) : partEntries(bucketIdx);
   if (!entries.length) return;
-  partViewer = { bucketIdx, entries, index: 0 };
+  partViewer = { bucketIdx, entries, index: 0, pageToken: 0 };
 
   partSheetThumb.src = bucket.thumbUrl;
   const totalQty = entries.reduce((s, e) => s + (e.qty || 0), 0);
@@ -2509,11 +2550,46 @@ function plural(n, one, few, many) {
   return many;
 }
 
-function showPartPage(index) {
+/** Ask the computer for a page and wait for it to appear.
+ *
+ * The wait is the honest part of this: the other machine has to draw it. It
+ * says so rather than showing an empty frame, and it gives up after a while
+ * instead of spinning forever if nobody is listening.
+ */
+async function fetchRemotePage(pageNum) {
+  const url = `/api/page/${pageNum}`;
+  const ready = await fetch(url, { cache: "no-store", method: "HEAD" }).catch(() => null);
+  if (!ready || !ready.ok) {
+    await fetch("/api/page-want", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ page: pageNum }),
+    }).catch(() => {});
+  }
+  for (let i = 0; i < 40; i++) {
+    const res = await fetch(url, { cache: "no-store" }).catch(() => null);
+    if (res && res.ok) return URL.createObjectURL(await res.blob());
+    await new Promise((r) => setTimeout(r, 400));
+  }
+  return null;
+}
+
+async function showPartPage(index) {
   if (!partViewer) return;
   partViewer.index = clamp(index, 0, partViewer.entries.length - 1);
   const e = partViewer.entries[partViewer.index];
-  partPageImg.src = e.thumb;
+  resetPageZoom();
+  if (IS_REMOTE) {
+    const token = ++partViewer.pageToken;
+    partPageImg.removeAttribute("src");
+    partPageWait.hidden = false;
+    const url = await fetchRemotePage(e.pageNum);
+    if (!partViewer || token !== partViewer.pageToken) return;  // moved on already
+    partPageWait.hidden = true;
+    if (url) partPageImg.src = url;
+    else partPageWait.hidden = false;
+  } else {
+    partPageImg.src = e.thumb;
+  }
   partSheetPos.textContent = `Страница ${e.pageNum} — ${partViewer.index + 1} из ${partViewer.entries.length}`;
   partPrevBtn.disabled = partViewer.index === 0;
   partNextBtn.disabled = partViewer.index === partViewer.entries.length - 1;
@@ -2528,6 +2604,116 @@ function showPartPage(index) {
 // part of the box. Percentages against the container would put the outline in
 // the wrong place (badly so on a phone, where the bars are large), so measure
 // where the image actually landed and place the outline in real pixels.
+/** Pinch, drag and double-tap on the page picture.
+ *
+ * Written out rather than left to the browser's own page zoom: on a phone the
+ * viewer is a full-screen sheet, and pinching that zooms the whole interface —
+ * the list, the buttons and the page together — which is not what anyone means
+ * by "приблизить". This zooms the page inside its frame and leaves everything
+ * else where it is.
+ *
+ * The highlight frame is moved by the same transform, so the marker that says
+ * "here is your part" stays on the part at any magnification.
+ */
+const PAGE_ZOOM_MAX = 6, PAGE_ZOOM_MIN = 1;
+let pageZoom = { k: 1, x: 0, y: 0 };
+
+function applyPageZoom() {
+  const t = `translate(${pageZoom.x}px, ${pageZoom.y}px) scale(${pageZoom.k})`;
+  partPageStage.style.transform = t;
+  partZoomLevel.textContent = `${Math.round(pageZoom.k * 100)}%`;
+  partSheetPage.classList.toggle("is-zoomed", pageZoom.k > 1.01);
+}
+
+function resetPageZoom() {
+  pageZoom = { k: 1, x: 0, y: 0 };
+  applyPageZoom();
+}
+
+/** Keep the point under the fingers under the fingers. */
+function zoomAt(k, cx, cy) {
+  const box = partSheetPage.getBoundingClientRect();
+  const px = cx - box.left - box.width / 2;
+  const py = cy - box.top - box.height / 2;
+  const next = clamp(k, PAGE_ZOOM_MIN, PAGE_ZOOM_MAX);
+  const ratio = next / pageZoom.k;
+  pageZoom.x = px - (px - pageZoom.x) * ratio;
+  pageZoom.y = py - (py - pageZoom.y) * ratio;
+  pageZoom.k = next;
+  if (pageZoom.k <= 1.01) { pageZoom.x = 0; pageZoom.y = 0; }
+  applyPageZoom();
+}
+
+function initPageZoom() {
+  const pointers = new Map();
+  let startDist = 0, startK = 1, lastX = 0, lastY = 0, lastTap = 0;
+
+  partSheetPage.addEventListener("pointerdown", (e) => {
+    partSheetPage.setPointerCapture(e.pointerId);
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) {
+      const [a, b] = Array.from(pointers.values());
+      startDist = Math.hypot(a.x - b.x, a.y - b.y);
+      startK = pageZoom.k;
+    } else {
+      lastX = e.clientX; lastY = e.clientY;
+    }
+  });
+
+  partSheetPage.addEventListener("pointermove", (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) {
+      const [a, b] = Array.from(pointers.values());
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      if (startDist > 0) zoomAt(startK * (dist / startDist), (a.x + b.x) / 2, (a.y + b.y) / 2);
+      e.preventDefault();
+    } else if (pageZoom.k > 1.01) {
+      pageZoom.x += e.clientX - lastX;
+      pageZoom.y += e.clientY - lastY;
+      lastX = e.clientX; lastY = e.clientY;
+      applyPageZoom();
+      e.preventDefault();
+    }
+  });
+
+  const release = (e) => {
+    pointers.delete(e.pointerId);
+    if (pointers.size < 2) startDist = 0;
+    if (pointers.size === 1) {
+      const p = Array.from(pointers.values())[0];
+      lastX = p.x; lastY = p.y;
+    }
+  };
+  partSheetPage.addEventListener("pointerup", release);
+  partSheetPage.addEventListener("pointercancel", release);
+
+  // double tap, and the mouse wheel for whoever is at a desk
+  partSheetPage.addEventListener("click", (e) => {
+    const now = Date.now();
+    if (now - lastTap < 320) {
+      zoomAt(pageZoom.k > 1.5 ? 1 : 2.6, e.clientX, e.clientY);
+      lastTap = 0;
+    } else {
+      lastTap = now;
+    }
+  });
+  partSheetPage.addEventListener("wheel", (e) => {
+    if (partOverlay.hidden) return;
+    e.preventDefault();
+    zoomAt(pageZoom.k * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX, e.clientY);
+  }, { passive: false });
+
+  partZoomIn.addEventListener("click", () => {
+    const b = partSheetPage.getBoundingClientRect();
+    zoomAt(pageZoom.k * 1.5, b.left + b.width / 2, b.top + b.height / 2);
+  });
+  partZoomOut.addEventListener("click", () => {
+    const b = partSheetPage.getBoundingClientRect();
+    zoomAt(pageZoom.k / 1.5, b.left + b.width / 2, b.top + b.height / 2);
+  });
+}
+
 function positionPartHighlight() {
   if (!partViewer) return;
   const e = partViewer.entries[partViewer.index];
@@ -2562,13 +2748,9 @@ partPrevBtn.addEventListener("click", () => showPartPage(partViewer.index - 1));
 partNextBtn.addEventListener("click", () => showPartPage(partViewer.index + 1));
 partSheetClose.addEventListener("click", closePartPages);
 partOverlay.addEventListener("click", (e) => { if (e.target === partOverlay) closePartPages(); });
-// tapping the page image hands off to the existing full-screen zoom
-partSheetPage.addEventListener("click", () => {
-  if (!partViewer) return;
-  const e = partViewer.entries[partViewer.index];
-  const idx = state.pageRecords.findIndex((r) => r.pageNum === e.pageNum);
-  if (idx >= 0) { state.stepIndex = idx; openZoom(); }
-});
+// The page used to hand off to a separate full-screen zoom window, which the
+// phone could not use at all: that view renders the PDF, and the phone has no
+// PDF. Zooming happens in place now (initPageZoom), on both machines.
 document.addEventListener("keydown", (e) => {
   if (partOverlay.hidden || !partViewer) return;
   if (e.key === "Escape") { e.preventDefault(); closePartPages(); }
@@ -3211,6 +3393,7 @@ qrAlt.addEventListener("click", (e) => {
   for (const b of qrAlt.querySelectorAll(".qr-alt-btn")) b.classList.toggle("is-on", b === btn);
 });
 
+initPageZoom();
 initLanBanner();
 initRemoteUi();
 renderLibrary();
@@ -3312,6 +3495,36 @@ async function detectSync() {
   }
 }
 
+/** Draw a page the phone asked for, and leave it on the server for it.
+ *
+ * The phone is a remote control: it never receives the PDF and never grinds
+ * through one. But a parts list you cannot look up in the instructions is half
+ * a tool, so it asks for a page by number and this — the machine that has the
+ * file — draws it. One page at a time, only when asked, and only once: a
+ * booklet is hundreds of pages and nobody wants them all over Wi-Fi for a
+ * glance at three.
+ */
+let servedPages = new Set();
+let servingPage = false;
+async function servePageRequest() {
+  if (servingPage || !pdfDoc) return;
+  try {
+    const res = await fetch("/api/page-want", { cache: "no-store" });
+    if (!res.ok) return;
+    const want = (await res.json()).page;
+    if (!want || servedPages.has(want)) return;
+    servingPage = true;
+    const dataUrl = await renderPageZoomDataUrl(want);
+    const blob = await (await fetch(dataUrl)).blob();
+    await fetch(`/api/page/${want}`, { method: "POST", body: blob });
+    servedPages.add(want);
+  } catch (e) {
+    // the phone will ask again on its next poll
+  } finally {
+    servingPage = false;
+  }
+}
+
 async function syncTick() {
   try {
     const [stateRes, metaRes, resMetaRes] = await Promise.all([
@@ -3340,6 +3553,8 @@ async function syncTick() {
     if (!IS_REMOTE && meta && meta.hasFile && meta.version !== lastLoadedPdfVersion) {
       await adoptSyncedPdf(meta, d);
     }
+
+    if (!IS_REMOTE) await servePageRequest();
 
     if (stateData && stateData.version > lastSyncedStateVersion) {
       lastSyncedStateVersion = stateData.version;

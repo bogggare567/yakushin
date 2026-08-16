@@ -194,10 +194,18 @@
       <button id="part-next" aria-label="Следующая страница">→</button>
     </div>
     <div class="part-sheet-page" id="part-sheet-page">
-      <img id="part-page-img" alt="Страница инструкции" />
-      <div class="part-highlight" id="part-highlight" hidden></div>
+      <div class="part-page-stage" id="part-page-stage">
+        <img id="part-page-img" alt="Страница инструкции" />
+        <div class="part-highlight" id="part-highlight" hidden></div>
+      </div>
+      <div class="part-page-wait" id="part-page-wait" hidden>Компьютер рисует страницу…</div>
+      <div class="part-zoom-controls" id="part-zoom-controls">
+        <button type="button" id="part-zoom-out" aria-label="Отдалить">−</button>
+        <span id="part-zoom-level">100%</span>
+        <button type="button" id="part-zoom-in" aria-label="Приблизить">+</button>
+      </div>
     </div>
-    <div class="part-sheet-hint">Рамкой отмечено, где программа увидела эту деталь. Нажмите на страницу, чтобы открыть её крупнее.</div>
+    <div class="part-sheet-hint" id="part-sheet-hint">Рамкой отмечено, где программа увидела эту деталь. Щипком или двойным касанием — крупнее.</div>
   </div>
 </div>
 

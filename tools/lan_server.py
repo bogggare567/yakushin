@@ -87,6 +87,16 @@ RESULTS = {"version": 0, "data": None}
 RESULTS_LOCK = threading.Lock()
 PDF_STORE = {"version": 0, "bytes": None, "name": None}
 
+# One rendered page at a time, on request. The phone has no PDF and no business
+# grinding through one, but it does need to see the page a part is on — so it
+# asks for a page number here and the computer, which has both the file and the
+# time, draws it and leaves it here to be picked up. A handful are kept so that
+# paging back and forth does not re-render.
+PAGES = {}
+PAGES_LOCK = threading.Lock()
+PAGE_LIMIT = 12
+PAGE_WANT = {"page": None, "version": 0}
+
 
 class Handler(http.server.SimpleHTTPRequestHandler):
     def end_headers(self):
@@ -152,6 +162,29 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
+        if self.path.startswith("/api/page-want"):
+            with PAGES_LOCK:
+                self._send_json(dict(PAGE_WANT))
+            return
+        if self.path.startswith("/api/page/"):
+            try:
+                num = int(self.path.rsplit("/", 1)[1].split("?")[0])
+            except ValueError:
+                self.send_response(400); self.end_headers(); return
+            with PAGES_LOCK:
+                data = PAGES.get(num)
+            if data is None:
+                self.send_response(404)
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "image/png")
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if self.path.startswith("/api/pdf/meta"):
             with PDF_LOCK:
                 self._send_json({
@@ -204,6 +237,30 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 RESULTS["version"] += 1
                 resp = {"version": RESULTS["version"]}
             self._send_json(resp)
+            return
+        if self.path.startswith("/api/page-want"):
+            try:
+                want = json.loads(body.decode("utf-8")).get("page")
+            except (ValueError, UnicodeDecodeError, AttributeError):
+                want = None
+            with PAGES_LOCK:
+                PAGE_WANT["page"] = int(want) if want else None
+                PAGE_WANT["version"] += 1
+                resp = dict(PAGE_WANT)
+            self._send_json(resp)
+            return
+        if self.path.startswith("/api/page/"):
+            try:
+                num = int(self.path.rsplit("/", 1)[1].split("?")[0])
+            except ValueError:
+                self.send_response(400); self.end_headers(); return
+            with PAGES_LOCK:
+                PAGES[num] = body
+                # keep the few most recent; a booklet is hundreds of pages and
+                # this process holds everything in memory
+                while len(PAGES) > PAGE_LIMIT:
+                    PAGES.pop(next(iter(PAGES)))
+            self._send_json({"page": num, "bytes": len(body)})
             return
         if self.path.startswith("/api/pdf"):
             name = self.headers.get("X-File-Name", "instructions.pdf")

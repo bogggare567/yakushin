@@ -905,6 +905,21 @@ input[type="range"] {
   /* transparent, so the letterbox bars around a page read as part of the
      sheet rather than as a big empty white slab */
   background: transparent;
+  /* the pinch belongs to the page, not to the whole interface: without this
+     the browser zooms the entire sheet and the list behind it */
+  touch-action: none;
+}
+
+.part-sheet-page.is-zoomed { cursor: grab; }
+.part-sheet-page.is-zoomed:active { cursor: grabbing; }
+
+/* one element carries the zoom, so the page and the frame drawn on it can
+   never drift apart from each other */
+.part-page-stage {
+  position: absolute;
+  inset: 0;
+  transform-origin: center center;
+  will-change: transform;
 }
 
 .part-sheet-page img {
@@ -912,6 +927,52 @@ input[type="range"] {
   width: 100%;
   height: 100%;
   object-fit: contain;
+  /* magnified six times a page should look like paper, not like a blur */
+  image-rendering: -webkit-optimize-contrast;
+}
+
+.part-page-wait {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.85rem;
+  color: var(--text-dim);
+  background: var(--panel-2);
+  border-radius: 10px;
+}
+
+.part-zoom-controls {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  border: 1px solid var(--border);
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.part-zoom-controls button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border-radius: 999px;
+  font-size: 1rem;
+  line-height: 1;
+  background: transparent;
+  color: var(--text);
+}
+
+.part-zoom-controls span {
+  min-width: 44px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
 }
 
 .part-highlight {

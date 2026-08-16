@@ -42,6 +42,7 @@ const STUD_STRONG_PEAK = 0.20; // a repeat vector must be this much of the best 
 const STUD_SQUARE_TOL = 0.80;  // the two lattice vectors must be near equal in length
 const STUD_SUPPORT_FLOOR = 0.10; // how much an icon must repeat along a lattice
 const STUD_LATTICE_MIN_AREA = 12000; // below this an icon cannot host a search
+const STUD_LATTICE_TRIES = 2;  // how many icons in a callout are searched, biggest first
 // A part's top face, in lattice cells, against the ink the part is drawn with.
 // Seen edge-on the top face is a fraction of the silhouette; it is never much
 // more than the whole of it.
@@ -63,10 +64,23 @@ const STUD_PITCH_MIN_SHARE = 0.34;
  * Checked against measuring each icon on its own: 156 of 156 agree, and it
  * gives an answer to 81 icons that could not measure themselves.
  */
-function studBoxLattice(preps) {
+async function studBoxLattice(preps, yieldFn) {
+  // Biggest first, and only a couple of them. Each search is a 512x512 FFT and
+  // there is no reason to run one on every icon in a callout: the largest icon
+  // carries the most stud periods and wins the scoring nearly every time. On a
+  // real page this was 192ms of the 261ms a page took, and it was one
+  // unbroken task — the loading animation stuttered through the whole wait.
+  const candidates = preps
+    .map((prep, i) => ({ prep, i }))
+    .filter(({ prep }) => prep && prep.w * prep.h >= STUD_LATTICE_MIN_AREA)
+    .sort((a, b) => b.prep.w * b.prep.h - a.prep.w * a.prep.h)
+    .slice(0, STUD_LATTICE_TRIES);
+
   let best = null, bestScore = -1;
-  for (const prep of preps) {
-    if (!prep || prep.w * prep.h < STUD_LATTICE_MIN_AREA) continue;
+  for (const { prep } of candidates) {
+    // one search is about three frames' worth of work, so the caller is given
+    // the chance to draw between them
+    if (yieldFn && best !== null) await yieldFn();
     const got = studLattice(prep);
     if (got && got.score > bestScore) { bestScore = got.score; best = got.pair; }
   }
