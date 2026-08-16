@@ -47,3 +47,4 @@ venv/
 /tools/model/audit*_merges.png
 /tools/model/audit*_dupes.png
 /tools/model/*_metrics.json
+/webapp/_run.html

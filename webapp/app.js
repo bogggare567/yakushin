@@ -63,6 +63,20 @@ const COLOR_TOL = 24;
 const COLOR_TOL_STRONG_SHAPE = 40; // colour may drift this far when the shape matches almost exactly
 const STRONG_SHAPE_DIST = 20; // grid distance below which a shape match counts as "almost exact"
 const GLYPH_MAX_DIST_FRAC = 0.22; // fraction of bits mismatched above which a glyph match is untrusted
+// What reaches the parts list but is not a part. Measured on a booklet's own
+// output rather than guessed: across 213 hand-checked real parts the thinnest
+// was 19px on its short side, and the closest any came to a printed digit was
+// 112 mismatched bits against 78 for the stray digits themselves. Each floor
+// below sits in one of those gaps.
+//
+// A rule that a flat single-colour rectangle cannot be a part was tried here
+// and removed: it threw away a yellow Technic beam, which really is drawn as a
+// flat bar with two thin outlines. Being uninteresting to look at is not
+// evidence of not being a part.
+const MIN_ICON_SIDE = 9 * SIZE_K;                    // thinner is a printed rule, not a brick
+const MIN_ICON_AREA = 60 * SIZE_K * SIZE_K;          // smaller is a speck
+const GLYPH_ICON_DIST_FRAC = 0.145;                  // this close to a digit's shape, it IS the digit
+const DIGIT_INK_LIMIT = 0.55;                        // more of the drawing than this being type
 
 const pdfInput = document.getElementById("pdf-input");
 const fileInfo = document.getElementById("file-info");
@@ -990,9 +1004,98 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
   const subData = pageCtx.getImageData(x0, y0, w, h);
   const fg = buildFgMask(subData, w, h);
 
+  const out = [];
+  for (const band of boxRowGroups(fg, w, h)) {
+    out.push(...extractRowItems(pageCanvas, pageCtx, subData, fg, x0, y0, w, band));
+  }
+  return out;
+}
+
+/** Cut a callout into its rows of items, before anything looks at columns.
+ *
+ * A callout is not always one row. 6540963 prints eight parts as two rows of
+ * four, and projecting that whole box onto its columns merges the top row's
+ * part with the bottom row's — which is how one white dome came back as "41x":
+ * a "1" from one row and a "2" from the other, read as one number.
+ *
+ * The bands of ink across the full width are the rows, and they alternate:
+ * drawings, then the quantities belonging to them, then the next drawings. So
+ * a band whose ink is mostly recognisable characters closes the group it ends.
+ * A callout with a single row is one group, which is what every yacht booklet
+ * page is, and nothing about it changes.
+ */
+function boxRowGroups(fg, w, h) {
+  const rowHasFg = [];
+  for (let y = 0; y < h; y++) {
+    let any = false;
+    for (let x = 0; x < w; x++) { if (fg[y * w + x]) { any = true; break; } }
+    rowHasFg.push(any);
+  }
+  const bands = findRuns(rowHasFg, MIN_ROW_GAP);
+  if (bands.length < 3) return [{ r0: 0, r1: h - 1 }];
+
+  // Which bands are lines of type is decided by the callout itself, not by a
+  // threshold. Two rows of parts print their quantities in the same size on
+  // both rows, so the lines of type are the small bands that REPEAT at one
+  // height; a callout with a single row has only one and is left whole, which
+  // is what it needs anyway. Deciding this by how closely a character matches
+  // a digit was tried first and could not be made to hold: a printed "1"
+  // scored 97 against one part's 112 on one page and 109 on another, and no
+  // fixed number lives in a gap that narrow.
+  const small = bands.filter(([bs, be]) => be - bs <= MIN_GLYPH_H * 2.5);
+  let best = [];
+  for (const cand of small) {
+    const ch = cand[1] - cand[0];
+    const group = small.filter(([bs, be]) => Math.abs((be - bs) - ch) <= ch * 0.25);
+    if (group.length > best.length) best = group;
+  }
+  if (best.length < 2) return [{ r0: 0, r1: h - 1 }];
+
+  // and at least one of them really is a digit, so that a callout of small
+  // parts in even rows is never mistaken for a page of type
+  if (!best.some(([bs, be]) => bandHasDigit(fg, w, bs, be - 1))) return [{ r0: 0, r1: h - 1 }];
+
+  const isLabel = new Set(best.map((b) => b[0]));
+  const groups = [];
+  let start = null;
+  for (const [bs, be] of bands) {
+    if (start === null) start = bs;
+    if (isLabel.has(bs)) { groups.push({ r0: start, r1: be - 1 }); start = null; }
+  }
+  if (start !== null) groups.push({ r0: start, r1: h - 1 });
+  return groups.length ? groups : [{ r0: 0, r1: h - 1 }];
+}
+
+/** Does this band contain something recognisable as a printed digit?
+ *
+ * Only ever asked of bands the callout has already nominated as its lines of
+ * type, so the tolerance here can be loose without letting drawings in: it is
+ * confirming a conclusion, not reaching one.
+ */
+function bandHasDigit(fg, w, r0, r1) {
+  const sh = r1 - r0 + 1;
+  if (sh < 4) return false;
+  const local = new Uint8Array(w * sh);
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < w; x++) local[y * w + x] = fg[(r0 + y) * w + x];
+  }
+  for (const c of findGlyphComponents(local, w, sh)) {
+    const gw = c.maxX - c.minX + 1, gh = c.maxY - c.minY + 1;
+    if (gh < sh * 0.5 || gw < MIN_GLYPH_W || gw > gh * MAX_GLYPH_ASPECT) continue;
+    const { mask, cw, ch } = componentLocalMask(c, w);
+    const m = classifyGlyph(resizeGlyphMask(mask, cw, ch));
+    if (/\d/.test(m.bestLabel) && m.bestDist <= GLYPH_MAX_DIST) return true;
+  }
+  return false;
+}
+
+function extractRowItems(pageCanvas, pageCtx, subData, fg, x0, y0, w, band) {
+  const h = band.r1 - band.r0 + 1;
+  if (h < 4) return [];
+
   const colHasFg = new Array(w).fill(false);
   for (let x = 0; x < w; x++) {
-    for (let y = 0; y < h; y++) { if (fg[y * w + x]) { colHasFg[x] = true; break; } }
+    for (let y = band.r0; y <= band.r1; y++) { if (fg[y * w + x]) { colHasFg[x] = true; break; } }
   }
   const colRuns = findRuns(colHasFg, MIN_COL_GAP);
 
@@ -1000,7 +1103,7 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
   for (const [cs, ce] of colRuns) {
     if (ce - cs < 8) continue;
     let r0 = -1, r1 = -1;
-    for (let y = 0; y < h; y++) {
+    for (let y = band.r0; y <= band.r1; y++) {
       let any = false;
       for (let x = cs; x < ce; x++) { if (fg[y * w + x]) { any = true; break; } }
       if (any) { if (r0 === -1) r0 = y; r1 = y; }
@@ -1041,8 +1144,13 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
     : Math.round(h * 0.22);
 
   const results = [];
+  const pieces = [];
   for (const { slot, splitRow } of partial) {
-    const { cs, ce, r0, r1 } = slot;
+    const byLabel = splitSlotByLabels(fg, w, slot);
+    if (byLabel) pieces.push(...byLabel);
+    else pieces.push({ cs: slot.cs, ce: slot.ce, r0: slot.r0, r1: slot.r1, splitRow });
+  }
+  for (const { cs, ce, r0, r1, splitRow } of pieces) {
     const slotH = r1 - r0 + 1;
     const effSplit = splitRow !== null ? splitRow : Math.max(1, slotH - medianTextH);
 
@@ -1052,6 +1160,8 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
     imgCanvas.getContext("2d").drawImage(
       pageCanvas, x0 + cs, y0 + r0, ce - cs, effSplit, 0, 0, ce - cs, effSplit
     );
+
+    if (!looksLikePart(imgCanvas)) continue;
 
     const txtH = slotH - effSplit;
     let qtyResult = { qty: null, unsure: true };
@@ -1070,6 +1180,169 @@ function extractBoxItems(pageCanvas, pageCtx, box) {
     });
   }
   return results;
+}
+
+
+/** Cut one slot into one item per printed quantity.
+ *
+ * The projection above can only split on a gap that crosses the whole slot,
+ * so two parts stacked one above the other — each with its own "1x" under it —
+ * arrive as a single item holding both, and three side by side whose drawings
+ * very nearly touch arrive the same way. Both were in the list as one "part"
+ * that is really a photograph of a callout.
+ *
+ * The booklet already says how many items are in there: it prints exactly one
+ * quantity per part. So the labels are found first and every other piece of ink
+ * is handed to the label it belongs under. No gap has to exist anywhere for
+ * that to work.
+ *
+ * Returns null when fewer than two labels are found, which is the ordinary
+ * case — one part, one label — and leaves the existing path untouched.
+ */
+function splitSlotByLabels(fg, w, slot) {
+  const { cs, ce, r0, r1 } = slot;
+  const sw = ce - cs, sh = r1 - r0 + 1;
+  if (sw < 8 || sh < 8) return null;
+
+  const local = new Uint8Array(sw * sh);
+  for (let y = 0; y < sh; y++) {
+    for (let x = 0; x < sw; x++) local[y * sw + x] = fg[(r0 + y) * w + (cs + x)];
+  }
+
+  const glyphs = [], rest = [];
+  for (const c of findGlyphComponents(local, sw, sh)) {
+    const gw = c.maxX - c.minX + 1, gh = c.maxY - c.minY + 1;
+    let label = null;
+    // The "x" of "1x" is shorter than the digit it follows, so the floor here
+    // is lower than the one the quantity reader uses — but the shape has to
+    // match much more tightly in exchange. At the reader's own tolerance a
+    // whole part came back as a confident "4": it is asked "which digit is
+    // this", never "is this a digit at all", and it always answers.
+    if (gh >= MIN_GLYPH_H * 0.6 && gw >= MIN_GLYPH_W && gw <= gh * MAX_GLYPH_ASPECT
+        && gh <= sh * 0.2) {
+      const { mask, cw, ch } = componentLocalMask(c, sw);
+      const m = classifyGlyph(resizeGlyphMask(mask, cw, ch));
+      if (m.bestDist <= GLYPH_MAX_DIST) label = m.bestLabel;
+    }
+    if (label !== null) { c.glyph = label; glyphs.push(c); } else rest.push(c);
+  }
+  if (glyphs.length < 2) return null;
+
+  // Characters sharing a baseline and standing next to each other are one
+  // number. The gap allowed is deliberately generous and then tightened by the
+  // merge below: splitting "12x" into two labels would invent a second part
+  // out of one, which is worse than any merge failure this can cause.
+  glyphs.sort((a, b) => a.minX - b.minX);
+  const bands = [];
+  for (const g of glyphs) {
+    const gh = g.maxY - g.minY + 1;
+    const band = bands.find((b) => {
+      const overlap = Math.min(b.maxY, g.maxY) - Math.max(b.minY, g.minY) + 1;
+      return overlap > Math.min(b.maxY - b.minY + 1, gh) * 0.4 && g.minX - b.maxX < gh * 1.2;
+    });
+    if (band) {
+      band.maxX = Math.max(band.maxX, g.maxX);
+      band.minY = Math.min(band.minY, g.minY);
+      band.maxY = Math.max(band.maxY, g.maxY);
+      band.text += g.glyph;
+    } else {
+      bands.push({ minX: g.minX, maxX: g.maxX, minY: g.minY, maxY: g.maxY, text: g.glyph });
+    }
+  }
+
+  const heights = bands.map((b) => b.maxY - b.minY + 1).sort((a, b) => a - b);
+  const medH = heights[heights.length >> 1];
+  // Two quantities printed in one callout are the same size as each other. A
+  // circled step number, or a digit printed on the part itself, is not — and
+  // treating one as a quantity would split a real part in half.
+  let kept = bands.filter((b) => {
+    const bh = b.maxY - b.minY + 1;
+    return bh >= medH * 0.75 && bh <= medH * 1.25 && /\d/.test(b.text);
+  });
+  // whatever is still within touching distance of a neighbour is one number
+  for (let i = 0; i < kept.length; i++) {
+    for (let j = i + 1; j < kept.length; j++) {
+      const a = kept[i], b = kept[j];
+      const dx = Math.max(0, Math.max(b.minX - a.maxX, a.minX - b.maxX));
+      const dy = Math.max(0, Math.max(b.minY - a.maxY, a.minY - b.maxY));
+      if (dx < medH * 1.5 && dy < medH * 0.5) {
+        a.minX = Math.min(a.minX, b.minX); a.maxX = Math.max(a.maxX, b.maxX);
+        a.minY = Math.min(a.minY, b.minY); a.maxY = Math.max(a.maxY, b.maxY);
+        a.text += b.text;
+        kept.splice(j--, 1);
+      }
+    }
+  }
+  const labels = kept;
+  if (labels.length < 2) return null;
+
+  const groups = labels.map((l) => ({ minX: l.minX, maxX: l.maxX, minY: l.minY, maxY: l.maxY, label: l }));
+  for (const c of rest.concat(bands.filter((b) => !labels.includes(b)))) {
+    let best = 0, bestCost = Infinity;
+    for (let i = 0; i < labels.length; i++) {
+      const l = labels[i];
+      const dx = Math.max(0, Math.max(l.minX - c.maxX, c.minX - l.maxX));
+      // a label belongs UNDER its own drawing, so one printed above this ink
+      // is much further away than the distance in pixels suggests
+      const dy = c.maxY <= l.minY ? (l.minY - c.maxY)
+        : (c.minY > l.maxY ? (c.minY - l.maxY) * 3 : 0);
+      if (dx + dy < bestCost) { bestCost = dx + dy; best = i; }
+    }
+    const g = groups[best];
+    g.minX = Math.min(g.minX, c.minX); g.maxX = Math.max(g.maxX, c.maxX);
+    g.minY = Math.min(g.minY, c.minY); g.maxY = Math.max(g.maxY, c.maxY);
+  }
+
+  return groups
+    .map((g) => ({
+      cs: cs + g.minX, ce: cs + g.maxX + 1,
+      r0: r0 + g.minY, r1: r0 + g.maxY,
+      splitRow: Math.max(1, g.label.minY - g.minY),  // the icon ends where its label begins
+    }))
+    .sort((a, b) => (a.r0 - b.r0) || (a.cs - b.cs));
+}
+
+/** Is this crop a drawing of a part at all?
+ *
+ * Three things get this far without being parts, and each is named here rather
+ * than filtered by a general "confidence": the printed quantity itself, when a
+ * slot holds nothing else; thin rules and flat bars of page furniture; and
+ * specks. None of them resembles a rendered brick, which always carries more
+ * than one shade — the lit top, the darker side and the stud shadows are the
+ * whole point of the drawing.
+ */
+function looksLikePart(canvas) {
+  const w = canvas.width, h = canvas.height;
+  if (w < MIN_ICON_SIDE || h < MIN_ICON_SIDE) return false;
+  const data = canvas.getContext("2d").getImageData(0, 0, w, h).data;
+  const mask = binaryOpen2x2(diffMask(data, w, h, FG_DIFF_THRESHOLD), w, h);
+
+  let minX = w, maxX = -1, minY = h, maxY = -1, n = 0;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!mask[y * w + x]) continue;
+      n++;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+    }
+  }
+  if (maxX < 0) return false;
+  const bw = maxX - minX + 1, bh = maxY - minY + 1;
+  if (Math.min(bw, bh) < MIN_ICON_SIDE || n < MIN_ICON_AREA) return false;
+
+  // The quantity itself, when the split left nothing above it. Measured as the
+  // share of ink that is confidently a digit: on three hand-checked pages the
+  // stray digits scored 0.77 and every real part scored exactly 0.
+  let digitInk = 0;
+  for (const c of findGlyphComponents(mask, w, h)) {
+    if (c.pixels.length / n < 0.05) continue;
+    const { mask: m, cw, ch } = componentLocalMask(c, w);
+    const { bestLabel, bestDist } = classifyGlyph(resizeGlyphMask(m, cw, ch));
+    if (/\d/.test(bestLabel) && bestDist <= GLYPH_W * GLYPH_H * GLYPH_ICON_DIST_FRAC) {
+      digitInk += c.pixels.length;
+    }
+  }
+  return digitInk / n < DIGIT_INK_LIMIT;
 }
 
 
