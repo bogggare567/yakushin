@@ -115,6 +115,9 @@ const qrOverlay = document.getElementById("qr-overlay");
 const qrCanvasHolder = document.getElementById("qr-canvas-holder");
 const qrUrl = document.getElementById("qr-url");
 const qrStable = document.getElementById("qr-stable");
+const qrStatus = document.getElementById("qr-status");
+const qrTrouble = document.getElementById("qr-trouble");
+const qrAlt = document.getElementById("qr-alt");
 const qrClose = document.getElementById("qr-close");
 const updateBanner = document.getElementById("update-banner");
 const updateText = document.getElementById("update-text");
@@ -2945,6 +2948,7 @@ async function resumeSession(id) {
 // ---------- LAN sharing (open on phone over Wi-Fi) ----------
 
 let qrLibPromise = null;
+let qrPeerTimer = null;
 function loadQrLib() {
   if (window.qrcode) return Promise.resolve();
   if (!qrLibPromise) {
@@ -2996,43 +3000,99 @@ function initRemoteUi() {
     + 'список считает компьютер, здесь его видно и можно отмечать найденное.</div>';
 }
 
-async function showQr() {
-  await loadQrLib();
-  // The QR always encodes the address this page is actually served on, so
-  // scanning it is guaranteed to work right now.
+function renderQrFor(host) {
   // The phone that scans this is a remote control, and says so in the link —
   // that is what stops it downloading the PDF and grinding through it again.
   const u = new URL(location.href);
   u.searchParams.set("remote", "1");
+  if (host) u.host = host;
   const url = u.toString();
   const qr = window.qrcode(0, "M");
   qr.addData(url);
   qr.make();
   qrCanvasHolder.innerHTML = qr.createSvgTag(6, 8);
   qrUrl.textContent = url;
+  return url;
+}
 
-  // ...but that address contains a router-assigned IP, which changes between
-  // sessions and silently breaks a link saved on the phone (exactly how this
-  // "doesn't open on my phone" turns up). Offer the mDNS name to bookmark.
+async function showQr() {
+  await loadQrLib();
+  renderQrFor(null);   // by default, the address this page is really served on
   qrStable.hidden = true;
+  qrTrouble.hidden = true;
+  qrAlt.innerHTML = "";
+  qrStatus.textContent = "Жду телефон…";
+  qrStatus.className = "qr-status";
+  qrOverlay.hidden = false;
+
+  let info = null;
   try {
     const res = await fetch("/api/info", { cache: "no-store" });
-    if (res.ok) {
-      const info = await res.json();
-      if (info.stableHost && !location.host.startsWith(info.stableHost)) {
-        qrStable.innerHTML = `Постоянный адрес (не меняется — можно сохранить в закладки на телефоне):<br><b>http://${escapeHtml(info.stableHost)}:${info.port}/</b>`;
-        qrStable.hidden = false;
-      }
-    }
+    if (res.ok) info = await res.json();
   } catch (e) {
     // plain static hosting - no such endpoint, just show the QR
   }
-  qrOverlay.hidden = false;
+  if (!info) { qrStatus.hidden = true; return; }
+  qrStatus.hidden = false;
+
+  // The Wi-Fi IP is handed out by the router and changes between sessions,
+  // which silently breaks any link bookmarked on a phone. The Bonjour/mDNS
+  // ".local" name does not change, so offer it as the address worth saving.
+  if (info.stableHost && !location.host.startsWith(info.stableHost)) {
+    qrStable.innerHTML = `Постоянный адрес (не меняется — можно сохранить в закладки на телефоне):<br><b>http://${escapeHtml(info.stableHost)}:${info.port}/</b>`;
+    qrStable.hidden = false;
+  }
+  watchForPhone(info);
+}
+
+/** Say out loud whether the phone actually arrived.
+ *
+ * Until now the computer showed a QR code and then went quiet, so a phone
+ * blocked by a firewall and a phone that simply had not been picked up yet
+ * looked exactly alike — the tester's "QR отдаёт, но не подключается" is that
+ * silence. The server records every device that reaches it, so this asks.
+ */
+function watchForPhone(info) {
+  clearInterval(qrPeerTimer);
+  const since = Date.now();
+  const known = new Set();
+  qrPeerTimer = setInterval(async () => {
+    if (qrOverlay.hidden) { clearInterval(qrPeerTimer); return; }
+    try {
+      const res = await fetch("/api/peers", { cache: "no-store" });
+      if (res.ok) {
+        const { peers } = await res.json();
+        const fresh = (peers || []).filter((p) => p.agoMs < 20000);
+        for (const p of fresh) known.add(p.ip);
+        if (known.size) {
+          qrStatus.textContent = `Телефон подключился (${Array.from(known).join(", ")})`;
+          qrStatus.className = "qr-status is-ok";
+          qrTrouble.hidden = true;
+          return;
+        }
+      }
+    } catch (e) { /* server went away; the checklist below still applies */ }
+    if (Date.now() - since > 15000 && qrTrouble.hidden) {
+      qrTrouble.hidden = false;
+      const others = (info.addresses || []).filter((a) => !location.host.startsWith(a));
+      if (others.length) {
+        qrAlt.innerHTML = "<b>Другие адреса этого компьютера</b> — нажмите, чтобы QR показал его:<br>"
+          + others.map((a) => `<button type="button" class="qr-alt-btn" data-host="${escapeHtml(a)}:${info.port}">http://${escapeHtml(a)}:${info.port}/</button>`).join("");
+      }
+    }
+  }, 1500);
 }
 
 lanQrBtn.addEventListener("click", showQr);
-qrClose.addEventListener("click", () => { qrOverlay.hidden = true; });
-qrOverlay.addEventListener("click", (e) => { if (e.target === qrOverlay) qrOverlay.hidden = true; });
+function closeQr() { qrOverlay.hidden = true; clearInterval(qrPeerTimer); }
+qrClose.addEventListener("click", closeQr);
+qrOverlay.addEventListener("click", (e) => { if (e.target === qrOverlay) closeQr(); });
+qrAlt.addEventListener("click", (e) => {
+  const btn = e.target.closest(".qr-alt-btn");
+  if (!btn) return;
+  renderQrFor(btn.dataset.host);
+  for (const b of qrAlt.querySelectorAll(".qr-alt-btn")) b.classList.toggle("is-on", b === btn);
+});
 
 initLanBanner();
 initRemoteUi();

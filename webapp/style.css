@@ -718,6 +718,62 @@ input[type="range"] {
 
 .qr-stable b { color: var(--text); }
 
+/* Whether the phone actually got through. The computer used to show a QR
+   code and then say nothing at all, so a firewall and a phone nobody had
+   picked up yet looked identical. */
+.qr-status {
+  margin-top: 10px;
+  font-size: 0.82rem;
+  color: var(--text-dim);
+}
+
+.qr-status::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 7px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.5;
+  animation: qr-wait 1.4s ease-in-out infinite;
+}
+
+.qr-status.is-ok { color: #1f8a4c; }
+.qr-status.is-ok::before { background: #1f8a4c; opacity: 1; animation: none; }
+
+@keyframes qr-wait { 0%, 100% { opacity: 0.25; } 50% { opacity: 0.9; } }
+
+.qr-trouble {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  line-height: 1.5;
+  text-align: left;
+}
+
+.qr-trouble ol { margin: 6px 0 0; padding-left: 18px; }
+.qr-trouble li { margin-bottom: 5px; }
+.qr-trouble b { color: var(--text); }
+
+.qr-alt-btn {
+  width: 100%;
+  margin-top: 6px;
+  padding: 7px 10px;
+  font-size: 0.78rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.qr-alt-btn.is-on { outline: 2px solid var(--accent); }
+
+@media (prefers-reduced-motion: reduce) {
+  .qr-status::before { animation: none; }
+}
+
 /* ---------- per-part page viewer ---------- */
 
 .part-overlay {
@@ -907,6 +963,10 @@ input[type="range"] {
   width: 100%;
   text-align: center;
   animation: fadeInUp 0.25s ease;
+  /* with the troubleshooting panel open this card is taller than a laptop
+     screen, and without this the QR code itself is what scrolls off the top */
+  max-height: 92vh;
+  overflow-y: auto;
 }
 
 .qr-card h3 { margin: 0 0 4px; font-size: 1.1rem; }

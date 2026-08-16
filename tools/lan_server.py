@@ -11,9 +11,62 @@ Usage: python3 lan_server.py [port] [webapp_dir]
 import http.server
 import json
 import os
+import socket
 import subprocess
 import sys
 import threading
+import time
+
+
+def local_addresses():
+    """Every IPv4 address this machine answers on, best guess first.
+
+    A laptop rarely has one. Windows in particular carries adapters for
+    VirtualBox, WSL, Hyper-V and any VPN, and picking the wrong one produces a
+    QR code that scans perfectly and then hangs forever - which is exactly what
+    "не открывается на телефоне" looks like from the phone's side.
+
+    The first entry is found by asking the routing table which address this
+    machine would use to reach the outside world; that is the one the phone on
+    the same Wi-Fi can also reach. The rest are offered as fallbacks rather
+    than guessed between.
+    """
+    out = []
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))     # no packet is sent; this only picks a route
+        out.append(s.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        s.close()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if ip not in out and not ip.startswith("127."):
+                out.append(ip)
+    except OSError:
+        pass
+    return out
+
+
+PEERS = {}          # ip -> when it was last heard from
+PEERS_LOCK = threading.Lock()
+OWN_ADDRS = set()   # filled once at startup; every request is checked against it
+
+
+def note_peer(ip):
+    """Remember that some other device really did reach us.
+
+    This is the whole answer to "did the phone connect?", which until now
+    nobody could see: the computer showed a QR code and then said nothing,
+    whether the phone arrived or a firewall ate it.
+    """
+    if not ip or ip.startswith("127.") or ip == "::1" or ip in OWN_ADDRS:
+        return
+    with PEERS_LOCK:
+        PEERS[ip] = time.time()
+
 
 def stable_hostname():
     """The machine's Bonjour/mDNS name (e.g. "MacBook-Air-Bogdan.local"), which
@@ -57,12 +110,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
+        note_peer(self.client_address[0])
+        if self.path.startswith("/api/peers"):
+            # who else has reached this server, and how recently
+            now = time.time()
+            with PEERS_LOCK:
+                seen = [{"ip": ip, "agoMs": int((now - t) * 1000)} for ip, t in PEERS.items()]
+            self._send_json({"peers": sorted(seen, key=lambda p: p["agoMs"])})
+            return
         if self.path.startswith("/api/info"):
             # The Wi-Fi IP is handed out by the router and changes between
             # sessions, which silently breaks any link bookmarked on a phone.
             # The Bonjour/mDNS ".local" name does not change, so offer it as
             # the address worth saving.
-            self._send_json({"stableHost": stable_hostname(), "port": self.server.server_address[1]})
+            self._send_json({"stableHost": stable_hostname(),
+                             "port": self.server.server_address[1],
+                             "addresses": local_addresses()})
             return
         if self.path.startswith("/api/state"):
             with STATE_LOCK:
@@ -114,6 +177,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         super().do_GET()
 
     def do_POST(self):
+        note_peer(self.client_address[0])
         length = int(self.headers.get("Content-Length", 0) or 0)
         body = self.rfile.read(length) if length else b""
         if self.path.startswith("/api/state"):
@@ -165,11 +229,21 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    # `--addresses` exists so a launcher script never has to parse ipconfig and
+    # guess which of a machine's adapters the phone can reach: taking the last
+    # IPv4 line, which Start.bat used to do, lands on VirtualBox or WSL as
+    # often as on Wi-Fi.
+    if "--addresses" in sys.argv:
+        print("\n".join(local_addresses()))
+        sys.exit(0)
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8934
     webapp_dir = sys.argv[2] if len(sys.argv) > 2 else "."
     os.chdir(webapp_dir)
+    OWN_ADDRS.update(local_addresses())
     server = http.server.ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Serving {os.path.abspath(webapp_dir)} on 0.0.0.0:{port}")
+    for ip in local_addresses():
+        print(f"  http://{ip}:{port}/")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

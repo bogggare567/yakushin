@@ -14,11 +14,20 @@ if %errorlevel%==0 (
     )
 )
 
+REM Which of this machine's addresses can the phone actually reach? Taking the
+REM last "IPv4" line out of ipconfig, which this script used to do, lands on
+REM VirtualBox, WSL, Hyper-V or a VPN adapter as often as on Wi-Fi - and a QR
+REM code carrying one of those scans perfectly and then hangs forever, which is
+REM precisely what "не открывается на телефоне" looks like from the phone. Ask
+REM the routing table instead, the same way the server does.
 set IP=
-for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do (
-    set IP=%%a
+for /f "delims=" %%a in ('python "%DIR%\tools\lan_server.py" --addresses 2^>NUL') do (
+    if not defined IP set IP=%%a
 )
-set IP=%IP: =%
+if "%IP%"=="" (
+    for /f "tokens=2 delims=:" %%a in ('ipconfig ^| findstr /c:"IPv4"') do set IP=%%a
+    set IP=!IP: =!
+)
 
 if "%IP%"=="" (
     echo Wi-Fi не найден - открываю локально ^(без доступа с телефона^).
@@ -56,6 +65,24 @@ if not defined CHOSEN (
 if not "!CHOSEN!"=="%PORT%" echo Порт %PORT% занят другой программой - использую !CHOSEN!.
 set PORT=!CHOSEN!
 
+REM Windows blocks incoming connections to python.exe unless someone allowed it
+REM in the popup at first launch, and a "Cancel" there is remembered forever as
+REM a block rule - after which the phone can never connect and nothing on
+REM screen says why. Opening the port outright needs administrator rights, so
+REM this tries and stays quiet if it cannot; the page itself now tells the user
+REM whether the phone got through, and what to do if it did not.
+netsh advfirewall firewall show rule name="abcTrain LEGO" >NUL 2>NUL
+if errorlevel 1 (
+    netsh advfirewall firewall add rule name="abcTrain LEGO" dir=in action=allow ^
+        protocol=TCP localport=%PORT% profile=private >NUL 2>NUL
+    if errorlevel 1 (
+        echo   [i] Не удалось открыть порт в брандмауэре ^(нужны права администратора^).
+        echo       Если телефон не подключится - запустите этот файл правой кнопкой,
+        echo       "Запуск от имени администратора", один раз.
+        echo.
+    )
+)
+
 echo.
 echo ==================================================================
 echo   Открой на телефоне (в этой же Wi-Fi сети):
@@ -63,11 +90,7 @@ echo.
 echo   http://%IP%:%PORT%/
 echo.
 echo   На сайте есть кнопка "Показать QR" - можно отсканировать камерой.
-echo   Оба устройства смогут делиться страницей и файлом инструкции.
-echo.
-echo   Если не открывается - проверьте, что это действительно IP вашего
-echo   Wi-Fi адаптера (см. полный вывод ipconfig ниже), и что брандмауэр
-echo   Windows не блокирует Python.
+echo   Оно само напишет, подключился телефон или нет.
 echo.
 echo   Чтобы остановить сервер - закройте это окно.
 echo ==================================================================

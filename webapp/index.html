@@ -175,6 +175,18 @@
     <p>Отсканируйте камерой телефона (тот же Wi-Fi)</p>
     <div id="qr-canvas-holder"></div>
     <div class="qr-url" id="qr-url"></div>
+    <div class="qr-status" id="qr-status">Жду телефон…</div>
+    <div class="qr-trouble" id="qr-trouble" hidden>
+      <b>Телефон не подключается?</b>
+      <ol>
+        <li>Телефон и компьютер должны быть в одной сети Wi-Fi (не мобильный интернет).</li>
+        <li>Windows при первом запуске спрашивает про сеть — надо разрешить Python
+          в частных сетях. Если тогда нажали «Отмена», откройте «Брандмауэр
+          Защитника Windows» → «Разрешить работу с приложением» и включите Python.</li>
+        <li>В гостевом Wi-Fi устройства часто изолированы друг от друга — подключитесь к обычной сети.</li>
+      </ol>
+      <div id="qr-alt"></div>
+    </div>
     <div class="qr-stable" id="qr-stable" hidden></div>
     <button id="qr-close">Закрыть</button>
   </div>
